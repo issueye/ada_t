@@ -219,6 +219,55 @@ func TestCompForAndIf(t *testing.T) {
 	}
 }
 
+func TestEntityDecoding(t *testing.T) {
+	cases := map[string]string{
+		"&amp;":     "&",
+		"&#65;":     "A",
+		"&#x41;":    "A",
+		"&bogus;":   "&bogus;",
+		"a & b":     "a & b",
+		"&#xD800;":  "&#xD800;", // 代理区非法
+		"&#0;":      "&#0;",
+		"&lt;b&gt;": "<b>",
+	}
+	for in, want := range cases {
+		if got := decodeEntities(in); got != want {
+			t.Errorf("decodeEntities(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	plan := compileOK(t, `<Column>
+  <Text>A &amp; B &lt;x&gt; &#65; &#x1F600; &unknown; &nbsp;</Text>
+  <TextInput placeholder="Tom &amp; Jerry" />
+  <Text>{{ '&amp;' }}</Text>
+</Column>`)
+	kids := plan["root"].(map[string]any)["children"].([]any)
+	text := kids[0].(map[string]any)
+	parts := text["parts"].([]any)
+	var got string
+	for _, p := range parts {
+		if v, ok := p.(map[string]any)["v"].(string); ok {
+			got += v
+		}
+	}
+	want := "A & B <x> A \U0001F600 &unknown; \u00a0"
+	if got != want {
+		t.Fatalf("文本实体解码 = %q, want %q", got, want)
+	}
+	input := kids[1].(map[string]any)
+	attrs := input["attrs"].(map[string]any)
+	if attrs["placeholder"] != "Tom & Jerry" {
+		t.Fatalf("属性实体解码 = %v", attrs["placeholder"])
+	}
+	// 表达式里的字符串字面量不做实体解码
+	exprText := kids[2].(map[string]any)
+	exprPart := exprText["parts"].([]any)[0].(map[string]any)
+	ast := exprPart["e"].(map[string]any)
+	if ast["v"] != "&amp;" {
+		t.Fatalf("表达式字面量被实体解码: %v", ast["v"])
+	}
+}
+
 func TestModelRejectsUnsupportedTag(t *testing.T) {
 	_, _, err := Compile(`<Column><Text a-model="state.x">t</Text></Column>`, Options{})
 	if err == nil || !strings.Contains(err.Error(), "不支持 a-model") {

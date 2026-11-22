@@ -238,9 +238,13 @@ function watch(source, cb, opts) {
         : () => source
   let last
   const e = {
+    deps: new Set(), // track 记录的依赖集合(stop 时逐一移除)
+    active: true,
     run() {
+      if (!this.active) return
+      cleanupDeps(this)
       const prev = activeEffect
-      activeEffect = e
+      activeEffect = this
       let nv
       try {
         nv = getter()
@@ -265,18 +269,26 @@ function watch(source, cb, opts) {
     }
   }
   if (opts && opts.immediate) cb(last, undefined)
-  return function stop() {
-    /* MVP:停止由实例卸载的整体清理承担 */
+  const stop = function () {
+    if (!e.active) return
+    e.active = false
+    cleanupDeps(e)
+    dirtyQueue.delete(e)
   }
+  // setup 里创建的 watch 随实例卸载/HMR 重新 setup 自动停止。
+  if (mountingInstance !== null) mountingInstance.cleanups.push(stop)
+  return stop
 }
 
 function effect(fn) {
   const e = {
     deps: new Set(), // track 记录的依赖集合(stop 时逐一移除)
+    active: true,
     run() {
-      cleanupDeps(e)
+      if (!this.active) return
+      cleanupDeps(this)
       const prev = activeEffect
-      activeEffect = e
+      activeEffect = this
       try {
         fn()
       } finally {
@@ -285,9 +297,14 @@ function effect(fn) {
     },
   }
   e.run()
-  return function stop() {
+  const stop = function () {
+    if (!e.active) return
+    e.active = false
     cleanupDeps(e)
+    dirtyQueue.delete(e)
   }
+  if (mountingInstance !== null) mountingInstance.cleanups.push(stop)
+  return stop
 }
 
 // ============================================================

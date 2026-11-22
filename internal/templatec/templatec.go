@@ -444,7 +444,7 @@ func appendText(parts []TextPart, s string) []TextPart {
 			return parts
 		}
 	}
-	return append(parts, TextPart{V: s})
+	return append(parts, TextPart{V: decodeEntities(s)})
 }
 
 func isSpace(b byte) bool {
@@ -724,7 +724,7 @@ func (c *compiler) buildElement(tok token, spec map[string]bool) (*Node, error) 
 					Message: fmt.Sprintf("<%s> 不支持属性 %q:%v", tok.name, a.key, propNames(spec))}
 			}
 			if a.key == "class" {
-				n.Class = append(n.Class, strings.Fields(a.val)...)
+				n.Class = append(n.Class, strings.Fields(decodeEntities(a.val))...)
 				continue
 			}
 			if n.Attrs == nil {
@@ -733,7 +733,7 @@ func (c *compiler) buildElement(tok token, spec map[string]bool) (*Node, error) 
 			if _, dup := n.Attrs[a.key]; dup {
 				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col, Message: fmt.Sprintf("重复的属性 %q", a.key)}
 			}
-			n.Attrs[a.key] = coerce(a.val)
+			n.Attrs[a.key] = coerce(decodeEntities(a.val))
 		}
 	}
 	// a-model 会占用控件的输入事件:再写同事件 a-on 会被模型 handler
@@ -1060,7 +1060,7 @@ func (c *compiler) buildComp(tok token) (*Node, error) {
 			if n.Attrs == nil {
 				n.Attrs = map[string]any{}
 			}
-			n.Attrs[a.key] = coerce(a.val)
+			n.Attrs[a.key] = coerce(decodeEntities(a.val))
 		}
 	}
 	return n, nil

@@ -168,7 +168,9 @@ func (w *winInput) syncText(key, jsVal string, report func(any)) *string {
 	shadow := w.sText[key]
 	if cur != shadow {
 		w.sText[key] = cur
-		report(map[string]any{"value": cur})
+		if report != nil {
+			report(map[string]any{"value": cur})
+		}
 		return ptr
 	}
 	if jsVal != shadow {
@@ -192,7 +194,9 @@ func (w *winInput) syncNum(key string, jsVal float64, report func(any)) *float64
 	shadow := w.sNum[key]
 	if cur != shadow {
 		w.sNum[key] = cur
-		report(map[string]any{"value": cur})
+		if report != nil {
+			report(map[string]any{"value": cur})
+		}
 		return ptr
 	}
 	if jsVal != shadow {
@@ -216,7 +220,9 @@ func (w *winInput) syncBool(key string, jsVal bool, report func(any)) *bool {
 	shadow := w.sBool[key]
 	if cur != shadow {
 		w.sBool[key] = cur
-		report(map[string]any{"value": cur})
+		if report != nil {
+			report(map[string]any{"value": cur})
+		}
 		return ptr
 	}
 	if jsVal != shadow {
@@ -241,7 +247,9 @@ func (w *winInput) syncIdx(key string, jsVal int, report func(any)) *int {
 	shadow := w.sIdx[key]
 	if cur != shadow {
 		w.sIdx[key] = cur
-		report(map[string]any{"value": cur})
+		if report != nil {
+			report(map[string]any{"value": cur})
+		}
 		return ptr
 	}
 	if jsVal != shadow {
@@ -353,7 +361,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		if v, ok := propFloat(n.Props, "max"); ok {
 			hi = v
 		}
-		ptr := in.syncNum(key, numProp(n.Props, "value"), func(p any) { fireEvent(n, winID, "input", p, fire) })
+		ptr := in.syncNum(key, numProp(n.Props, "value"), nil)
 		el := applySize(ui.Slider(c, ptr, lo, hi), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "input", map[string]any{"value": *ptr}, fire)
@@ -372,7 +380,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		if v, ok := propFloat(n.Props, "step"); ok {
 			step = v
 		}
-		ptr := in.syncNum(key, numProp(n.Props, "value"), func(p any) { fireEvent(n, winID, "input", p, fire) })
+		ptr := in.syncNum(key, numProp(n.Props, "value"), nil)
 		el := applySize(ui.Stepper(c, ptr, lo, hi, step), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "input", map[string]any{"value": *ptr}, fire)
@@ -402,13 +410,8 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 				fireEvent(n, winID, "change", map[string]any{"value": labels[i]}, fire)
 			}
 		}
-		ptr := in.syncIdx(key, idx, func(p any) {
-			if m, ok := p.(map[string]any); ok {
-				if vi, ok := m["value"].(int); ok {
-					fireChoice(vi)
-				}
-			}
-		})
+		// 用户选择由 el.Changed() 统一上报(syncIdx 不再重复回报)。
+		ptr := in.syncIdx(key, idx, nil)
 		var el ui.Element
 		if n.Tag == "Segmented" {
 			el = applySize(ui.Segmented(c, ptr, labels...), n.Props)
@@ -427,7 +430,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		if v, ok := propFloat(n.Props, "value"); ok {
 			def = v // a-model 的值优先
 		}
-		ptr := in.syncNum32(key, def, func(p any) { fireEvent(n, winID, "input", p, fire) })
+		ptr := in.syncNum32(key, def, nil)
 		if len(n.Children) != 2 {
 			return ui.Text(c, "[Split 需要两个子节点]")
 		}
@@ -493,9 +496,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 			in.lists[key] = s
 		}
 		s.FollowEnd = propBool(n.Props, "follow-end")
-		selPtr := in.syncIdx(key+"", int(numProp(n.Props, "selected")), func(p any) {
-			fireEvent(n, winID, "change", p, fire)
-		})
+		selPtr := in.syncIdx(key+"", int(numProp(n.Props, "selected")), nil)
 		s.Selected = selPtr
 		el := applySize(ui.Table(c, s, cols, len(rows), func(row int, col int) {
 			if row < 0 || row >= len(rows) || col < 0 || col >= len(fields) {
@@ -520,9 +521,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		if v, ok := propFloat(n.Props, "max"); ok {
 			maxStars = v
 		}
-		ptr := in.syncIdx(key, int(numProp(n.Props, "selected")), func(p any) {
-			fireEvent(n, winID, "change", p, fire)
-		})
+		ptr := in.syncIdx(key, int(numProp(n.Props, "selected")), nil)
 		el := applySize(ui.Rating(c, ptr, int(maxStars)), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "change", map[string]any{"value": *ptr}, fire)
@@ -733,7 +732,9 @@ func (w *winInput) syncNum32(key string, jsVal float64, report func(any)) *float
 	shadow := w.sF32[key]
 	if cur != shadow {
 		w.sF32[key] = cur
-		report(map[string]any{"value": cur})
+		if report != nil {
+			report(map[string]any{"value": cur})
+		}
 		return ptr
 	}
 	if float32(jsVal) != shadow {

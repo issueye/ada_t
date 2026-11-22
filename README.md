@@ -375,10 +375,15 @@ dist/ui/
 | 样式 | `internal/stylec/stylec_test.go` | 令牌、@规则/全局选择器/url()/白名单外属性/重复规则拒绝 |
 | 降级 | `internal/scriptc/scriptc_test.go` | TS 擦除 + enum 内联、语法错误、loader 选择 |
 | 编译 | `internal/compile/compile_test.go`、`regression_test.go` | 相对导入解析、裸包名/越界拒绝、多组件入口、Build→Verify→篡改检测、构建确定性、manifest 摘要/路径安全、诊断行号 |
-| 运行时 | `internal/rt/rt_test.go`、`regression_test.go` | 端到端:首帧、点击→computed、a-if、a-model、a-for 增长、watch、$t、嵌套组件 props/emit、EUIIMPORT;多窗口事件、handler 跨帧稳定、动态 props、附加包后 HMR、子组件 setup 错误卡片、服务 panic |
+| 运行时 | `internal/rt/rt_test.go`、`regression_test.go` | 端到端:首帧、点击→computed、a-if、a-model、a-for 增长、watch、$t、嵌套组件 props/emit、EUIIMPORT;多窗口事件、handler 跨帧稳定、动态 props、附加包后 HMR、子组件 setup 错误卡片、服务 panic、watch stop |
+| 原生重放 | `backend/mygoui/replay_test.go` | mygo Tester 无窗口驱动:按钮点击、TextInput 双向同步、Checkbox/Segmented 事件与去重 |
 | 公共 API | `app_test.go`、`cmd/adat/main_test.go` | 窗口 id/WindowIDs、Run/Stop 幂等、Inspector 附加窗口、CLI 参数重排 |
 
 运行时测试在 headless 后端上跑:`waitFor` 轮询树状态,等价于真实后端把原生事件翻译成 handler 调用。
+原生重放测试用 mygo 的 `ui.Tester` 在内存里渲染并注入点击/输入,不需要显示器。
+
+CI 见 [.github/workflows/ci.yml](.github/workflows/ci.yml):Linux(CGO=0)做构建 + 核心测试,
+Windows 做全量测试、race 与基准冒烟。
 
 ## 7. 目录
 

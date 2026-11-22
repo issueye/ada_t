@@ -224,6 +224,56 @@ export default {
 	}, "渲染期状态变更未触发补渲染")
 }
 
+// watch 返回的 stop 必须真正解除依赖;setup 里创建的 watch 随实例清理。
+func TestWatchStop(t *testing.T) {
+	const aui = `<template>
+  <Column>
+    <Text>{{ state.n }} / {{ state.hits }}</Text>
+    <Button a-on:click="inc">Inc</Button>
+    <Button a-on:click="stopWatch">Stop</Button>
+  </Column>
+</template>
+<script lang="ts">
+import { reactive, watch } from 'ada:surface'
+export default {
+  setup() {
+    const state = reactive({ n: 0, hits: 0 })
+    const stop = watch(() => state.n, () => { state.hits++ })
+    function inc() { state.n++ }
+    function stopWatch() { stop() }
+    return { state, inc, stopWatch }
+  },
+}
+</script>`
+	pkg := mustCompile(t, "W.aui", map[string]string{"W.aui": aui})
+	b := headless.New()
+	r, err := rt.New(pkg, rt.Options{Logf: func(string, ...any) {}, OnTree: b.Apply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	b.SetDispatch(func(_ string, hid string, payload any) { r.Fire(hid, payload) })
+	if _, err := r.MountWindow("main", "W", nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.Tree("main") != nil }, "首帧")
+	click := func(label string) {
+		t.Helper()
+		id := findTagID(b.Tree("main"), "Button", label)
+		if id == "" {
+			t.Fatalf("找不到按钮 %s:\n%s", label, b.Tree("main").Dump())
+		}
+		if !b.Fire("main", id, "click", nil) {
+			t.Fatalf("%s 点击派发失败", label)
+		}
+	}
+	click("Inc")
+	waitFor(t, func() bool { return findTagID(b.Tree("main"), "Text", "1 / 1") != "" }, "watch 未触发")
+	click("Stop")
+	click("Inc")
+	waitFor(t, func() bool { return findTagID(b.Tree("main"), "Text", "2 / 1") != "" }, "stop 之后 watch 仍在触发")
+}
+
 // 子组件 setup 失败:展示自己的错误卡片,而不是空 Column。
 func TestChildSetupErrorCard(t *testing.T) {
 	files := map[string]string{
