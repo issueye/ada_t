@@ -1,7 +1,7 @@
 // Package templatec 把 .aui 的 <template> 编译为 RenderPlan(JSON AST)。
 //
 // 受控 HTML 子集 + Ada 指令(§4.2):a-if/a-else-if/a-else、a-for(+a-key)、
-// a-on:event(.mods)、a-model、a-bind:name、a-class:name、a-prop:name。
+// a-on:event、a-model、a-bind:name、a-class:name、a-prop:name。
 // 标签词表是 native 控件面(Column/Row/Text/Button/...),大写标签解析为
 // 包内组件。裸文本自动包一层 Text。产物是 planVersion=1 的 JSON,
 // 由 surface.js(moejs)解释渲染。
@@ -10,8 +10,10 @@ package templatec
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/issueye/ada_t/internal/colorval"
 	"github.com/issueye/ada_t/internal/expr"
 )
 
@@ -22,6 +24,7 @@ const (
 	CodeTemplate Code = "EUITEMPLATE"
 	CodeStruct   Code = "EUISTRUCT"
 	CodeSecurity Code = "EUISECURITY"
+	CodeExpr     Code = "EUIEXPR"
 )
 
 // Error 是模板诊断(带文件行列)。
@@ -653,6 +656,10 @@ func (c *compiler) buildElement(tok token, spec map[string]bool) (*Node, error) 
 				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
 					Message: "action/dismiss 事件只能用于 <AlertDialog>"}
 			}
+			if len(mods) > 0 {
+				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
+					Message: fmt.Sprintf("事件修饰符 .%s 尚未支持", strings.Join(mods, "."))}
+			}
 			for _, prev := range n.On {
 				if prev.Ev == ev {
 					return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
@@ -733,7 +740,12 @@ func (c *compiler) buildElement(tok token, spec map[string]bool) (*Node, error) 
 			if _, dup := n.Attrs[a.key]; dup {
 				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col, Message: fmt.Sprintf("重复的属性 %q", a.key)}
 			}
-			n.Attrs[a.key] = coerce(decodeEntities(a.val))
+			val := coerce(decodeEntities(a.val))
+			if (a.key == "color" || a.key == "background") && !validStaticColor(val) {
+				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
+					Message: fmt.Sprintf("%q 不是合法颜色(支持 #rgb/#rgba/#rrggbb/#rrggbbaa)", a.val)}
+			}
+			n.Attrs[a.key] = val
 		}
 	}
 	// a-model 会占用控件的输入事件:再写同事件 a-on 会被模型 handler
@@ -759,6 +771,9 @@ func (c *compiler) buildElement(tok token, spec map[string]bool) (*Node, error) 
 		if n.Key == nil {
 			c.warnf(tok.line, "a-for 建议提供 a-key(对象项必须提供)")
 		}
+	} else if n.Key != nil {
+		return nil, &Error{Code: CodeTemplate, Line: tok.line, Col: tok.col,
+			Message: "a-key 只能与 a-for 一起使用"}
 	}
 	return n, nil
 }
@@ -858,7 +873,8 @@ func stripFor(n *Node) *Node {
 
 func (c *compiler) exprErr(err error, a attr) error {
 	if e, ok := err.(*expr.Error); ok {
-		return &Error{Code: CodeTemplate, Line: a.line, Col: a.col, Message: e.Message}
+		// 表达式错误保留自己的诊断码(EUIEXPR),与模板/安全错误区分。
+		return &Error{Code: CodeExpr, Line: a.line, Col: a.col, Message: e.Message}
 	}
 	return err
 }
@@ -868,7 +884,9 @@ func splitMods(rest string) (string, []string) {
 	return segs[0], segs[1:]
 }
 
-func eventNames() []string { return []string{"click", "input", "change"} }
+func eventNames() []string {
+	return []string{"click", "input", "change", "submit", "action", "dismiss"}
+}
 
 func modelKind(tag string) string {
 	switch tag {
@@ -940,6 +958,16 @@ func isIdentName(s string) bool {
 	return true
 }
 
+// validStaticColor 校验静态颜色属性:#hex 必须是合法写法;命名色与动态值
+// 放行(命名色的最终映射在重放后端,动态值由 a-bind 在运行期给)。
+func validStaticColor(v any) bool {
+	s, ok := v.(string)
+	if !ok || !strings.HasPrefix(s, "#") {
+		return true
+	}
+	return colorval.ValidHex(s)
+}
+
 // coerce 把静态属性字符串转成 number/bool/string(空值 = 布尔开关)。
 func coerce(v string) any {
 	switch v {
@@ -951,8 +979,8 @@ func coerce(v string) any {
 		return true // 无值属性(fill center)即开关
 	}
 	if isNumericLiteral(v) {
-		var f float64
-		if _, err := fmt.Sscanf(v, "%g", &f); err == nil {
+		// ParseFloat 严格校验:1.2.3 这类输入保持字符串,不再被 Sscanf 静默截断。
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
 	}
@@ -1045,6 +1073,10 @@ func (c *compiler) buildComp(tok token) (*Node, error) {
 		case strings.HasPrefix(a.key, "a-on:"):
 			rest := a.key[len("a-on:"):]
 			ev, mods := splitMods(rest)
+			if len(mods) > 0 {
+				return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
+					Message: fmt.Sprintf("事件修饰符 .%s 尚未支持", strings.Join(mods, "."))}
+			}
 			// 组件事件是组件自己的契约(select/change/…自定义),不受 native 白名单限制;
 			// 白名单只管原生控件标签。
 			action, err := expr.ParseAction(a.val)
@@ -1056,12 +1088,26 @@ func (c *compiler) buildComp(tok token) (*Node, error) {
 			return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col, Message: "组件用 a-prop: 传参"}
 		case a.key == "class":
 			c.warnf(tok.line, "组件标签上的 class 被忽略(样式属于组件自身)")
+		case a.key == "a-html" || strings.HasPrefix(a.key, "a-html:"):
+			return nil, &Error{Code: CodeSecurity, Line: a.line, Col: a.col, Message: fmt.Sprintf("%s 不被支持(无动态 HTML)", a.key)}
+		case a.key == "a-ref":
+			return nil, &Error{Code: CodeSecurity, Line: a.line, Col: a.col, Message: "a-ref 不被支持(无 DOM 引用)"}
+		case strings.HasPrefix(a.key, "on") && len(a.key) > 2:
+			return nil, &Error{Code: CodeSecurity, Line: a.line, Col: a.col,
+				Message: "组件上的 on* 属性会被当成普通 prop;事件请用 a-on:,普通属性请改名"}
+		case strings.HasPrefix(a.key, "a-"):
+			return nil, &Error{Code: CodeTemplate, Line: a.line, Col: a.col,
+				Message: fmt.Sprintf("组件不支持指令 %q:动态 props 用 a-prop:,事件用 a-on:", a.key)}
 		default:
 			if n.Attrs == nil {
 				n.Attrs = map[string]any{}
 			}
 			n.Attrs[a.key] = coerce(decodeEntities(a.val))
 		}
+	}
+	if n.Src == nil && n.Key != nil {
+		return nil, &Error{Code: CodeTemplate, Line: tok.line, Col: tok.col,
+			Message: "a-key 只能与 a-for 一起使用"}
 	}
 	return n, nil
 }

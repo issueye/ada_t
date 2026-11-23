@@ -15,12 +15,7 @@
 package adat
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -223,14 +218,14 @@ func (a *App) Pkg() *compile.Package {
 func WatchDir(dir, entry string, interval time.Duration, onPkg func(*compile.Package)) (stop func()) {
 	stopCh := make(chan struct{})
 	go func() {
-		last := dirHash(dir)
+		last := compile.DirSignature(dir)
 		for {
 			select {
 			case <-stopCh:
 				return
 			case <-time.After(interval):
 			}
-			now := dirHash(dir)
+			now := compile.DirSignature(dir)
 			if now == last {
 				continue
 			}
@@ -243,29 +238,6 @@ func WatchDir(dir, entry string, interval time.Duration, onPkg func(*compile.Pac
 		}
 	}()
 	return func() { close(stopCh) }
-}
-
-// dirHash 是组件目录里 .aui/.ts/.js 文件的指纹(路径+mtime+大小)。
-func dirHash(dir string) string {
-	type fv struct {
-		Name string    `json:"n"`
-		Mod  time.Time `json:"m"`
-		Size int64     `json:"s"`
-	}
-	var files []fv
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext == ".aui" || ext == ".ts" || ext == ".js" {
-			files = append(files, fv{path, info.ModTime(), info.Size()})
-		}
-		return nil
-	})
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	b, _ := json.Marshal(files)
-	return string(b)
 }
 
 // —— Go 服务桥 ——
@@ -320,5 +292,5 @@ func (a *App) WindowIDs() []string {
 // DumpWindow 返回窗口当前 widget 树的调试文本。
 func (a *App) DumpWindow(winID string) string { return a.rt.TreeDump(winID) }
 
-// Stats 返回 surface 注册表计数(实例/handler/事件订阅/窗口)。
+// Stats 返回 surface 注册表计数(实例/handler/事件订阅/窗口/渲染 pass 数)。
 func (a *App) Stats() (map[string]float64, error) { return a.rt.Stats() }

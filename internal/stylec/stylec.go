@@ -8,7 +8,10 @@ package stylec
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/issueye/ada_t/internal/colorval"
 )
 
 // Code 是样式诊断码。
@@ -43,6 +46,7 @@ var propWhitelist = map[string]string{
 // Compile 解析样式文本,返回 class → (prop → 值) 令牌表。
 // scoped 标记是约定的:所有规则天然只作用于本组件(令牌按组件存储)。
 func Compile(src string) (map[string]map[string]any, error) {
+	src = stripComments(src) // 注释替换为空白,保留换行(诊断行号不变)
 	tokens := map[string]map[string]any{}
 	line := 1
 	pos := 0
@@ -101,7 +105,8 @@ func Compile(src string) (map[string]map[string]any, error) {
 				pos++
 				break
 			}
-			// 属性: 到 ':'
+			// 属性: 到 ':'(pLine 是属性名所在行,供诊断定位)
+			pLine := line
 			pStart := pos
 			for pos < len(src) && src[pos] != ':' && src[pos] != '}' && src[pos] != ';' {
 				if src[pos] == '\n' {
@@ -110,7 +115,7 @@ func Compile(src string) (map[string]map[string]any, error) {
 				pos++
 			}
 			if pos >= len(src) || src[pos] == '}' || src[pos] == ';' {
-				return nil, &Error{Line: startLine, Message: "声明缺少 ':'"}
+				return nil, &Error{Line: pLine, Message: "声明缺少 ':'"}
 			}
 			prop := strings.TrimSpace(src[pStart:pos])
 			pos++ // :
@@ -126,14 +131,17 @@ func Compile(src string) (map[string]map[string]any, error) {
 				pos++
 			}
 			if prop == "" {
-				return nil, &Error{Line: startLine, Message: "空属性名"}
+				return nil, &Error{Line: pLine, Message: "空属性名"}
 			}
 			target, ok := propWhitelist[prop]
 			if !ok {
-				return nil, &Error{Line: startLine, Message: fmt.Sprintf("属性 %q 不在白名单:%v", prop, whitelistNames())}
+				return nil, &Error{Line: pLine, Message: fmt.Sprintf("属性 %q 不在白名单:%v", prop, whitelistNames())}
 			}
 			if strings.Contains(value, "url(") {
-				return nil, &Error{Line: startLine, Message: "url() 被拒绝(native 令牌不支持)"}
+				return nil, &Error{Line: pLine, Message: "url() 被拒绝(native 令牌不支持)"}
+			}
+			if (target == "color" || target == "background") && strings.HasPrefix(value, "#") && !colorval.ValidHex(value) {
+				return nil, &Error{Line: pLine, Message: fmt.Sprintf("%q 不是合法颜色(支持 #rgb/#rgba/#rrggbb/#rrggbbaa)", value)}
 			}
 			rules[target] = coerceValue(value)
 		}
@@ -189,11 +197,42 @@ func coerceValue(v string) any {
 	case "false":
 		return false
 	}
-	var f float64
-	if _, err := fmt.Sscanf(v, "%g", &f); err == nil && isNumeric(v) {
-		return f
+	if isNumeric(v) {
+		// ParseFloat 严格校验:1.2.3 这类输入保持字符串,不再被 Sscanf 静默截断。
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
 	return v
+}
+
+// stripComments 把 /* ... */ 替换为等长空白(保留换行),让注释不参与
+// 选择器/声明解析,同时不改变诊断行号。
+func stripComments(s string) string {
+	if !strings.Contains(s, "/*") {
+		return s
+	}
+	b := []byte(s)
+	for i := 0; i < len(b); {
+		if i+1 < len(b) && b[i] == '/' && b[i+1] == '*' {
+			j := i + 2
+			for j+1 < len(b) && !(b[j] == '*' && b[j+1] == '/') {
+				j++
+			}
+			if j+1 < len(b) {
+				j += 2 // 吃掉 */
+			}
+			for k := i; k < j && k < len(b); k++ {
+				if b[k] != '\n' {
+					b[k] = ' '
+				}
+			}
+			i = j
+			continue
+		}
+		i++
+	}
+	return string(b)
 }
 
 func isNumeric(v string) bool {

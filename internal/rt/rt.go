@@ -78,6 +78,11 @@ type Runtime struct {
 
 	notifyPending atomic.Bool
 	closed        atomic.Bool
+	// closedCh 在 Close 时关闭:阻塞等待 loop 结果的调用方据此立即返回。
+	// moejs 的 Loop.Stop 会把「已投递但未执行」的任务留给下一次 Start,
+	// 而本层从不重启 loop,没有这个信号等待方会永久阻塞。
+	closedCh  chan struct{}
+	closeOnce sync.Once
 
 	toastMu sync.Mutex
 	toastQ  map[string][]string // winID → 待显示的 toast(重放帧时消费)
@@ -110,6 +115,7 @@ func New(pkg *compile.Package, opts Options) (*Runtime, error) {
 		toastQ:     map[string][]string{},
 		knownComps: map[string]bool{},
 		defined:    map[string]bool{},
+		closedCh:   make(chan struct{}),
 	}
 
 	raw := moejs.NewRuntime(moejs.Options{
@@ -141,10 +147,15 @@ func (r *Runtime) initOnLoop() error {
 	if !r.post(func() { ready <- r.init() }) {
 		return fmt.Errorf("rt: eventloop 未运行")
 	}
-	if err := <-ready; err != nil {
-		return err
+	select {
+	case err := <-ready:
+		if err != nil {
+			return err
+		}
+		return nil
+	case <-r.closedCh:
+		return fmt.Errorf("rt: 运行时已关闭")
 	}
-	return nil
 }
 
 func (r *Runtime) post(fn func()) bool {
@@ -476,8 +487,8 @@ func (r *Runtime) UnmountWindow(winID string) {
 	}
 }
 
-// Stats 返回 surface 注册表计数(实例/handler/事件订阅/窗口)。
-// 泄漏测试与 Inspector 用;值为 JSON 反序列化后的浮点数。
+// Stats 返回 surface 注册表计数(实例/handler/事件订阅/窗口/渲染 pass 数,
+// 键名 renders)。泄漏测试、单次渲染回归与 Inspector 用;值为 JSON 反序列化后的浮点数。
 func (r *Runtime) Stats() (map[string]float64, error) {
 	out, err := r.runOnLoopString("stats")
 	if err != nil {
@@ -522,10 +533,15 @@ func (r *Runtime) Expose(service, method string, fn any) error {
 	}) {
 		return fmt.Errorf("rt: eventloop 未运行")
 	}
-	if err := <-ready; err != nil {
-		return fmt.Errorf("rt: 注册服务 %s.%s 失败: %w", service, method, err)
+	select {
+	case err := <-ready:
+		if err != nil {
+			return fmt.Errorf("rt: 注册服务 %s.%s 失败: %w", service, method, err)
+		}
+		return nil
+	case <-r.closedCh:
+		return fmt.Errorf("rt: 运行时已关闭")
 	}
-	return nil
 }
 
 // nativeServiceCallAsync:异步版本。参数在 loop 上解析,调用跑在独立
@@ -628,7 +644,10 @@ func (r *Runtime) Notify(event string, payload any) {
 // 直接构造新的 App/Runtime(旧实例 Close),避免在已停止的 loop 上做原地交换。
 
 // Close 停止运行时。可重复调用。
+// 先关闭 closedCh 唤醒所有等待 loop 结果的调用方,再停止 loop——
+// 否则 Stop 留下未执行任务时,那些调用方会永久阻塞。
 func (r *Runtime) Close() error {
+	r.closeOnce.Do(func() { close(r.closedCh) })
 	r.closed.Store(true)
 	r.mu.Lock()
 	r.stopped = true
@@ -663,8 +682,12 @@ func (r *Runtime) runOnLoopString(fn string, args ...string) (string, error) {
 	}) {
 		return "", fmt.Errorf("rt: eventloop 未运行")
 	}
-	got := <-ch
-	return got.v, got.err
+	select {
+	case got := <-ch:
+		return got.v, got.err
+	case <-r.closedCh:
+		return "", fmt.Errorf("rt: 运行时已关闭")
+	}
 }
 
 // callString 在 loop goroutine 上调用 surface 全局函数,返回字符串(或空)。
@@ -759,8 +782,13 @@ func (r *Runtime) HotReload(newPkg *compile.Package) error {
 	if !r.post(func() { done <- r.hotReload(newPkg, false) }) {
 		return fmt.Errorf("rt: eventloop 未运行")
 	}
-	if err := <-done; err != nil {
-		return err
+	select {
+	case err := <-done:
+		if err != nil {
+			return err
+		}
+	case <-r.closedCh:
+		return fmt.Errorf("rt: 运行时已关闭")
 	}
 	r.mu.Lock()
 	r.pkg = newPkg
@@ -776,10 +804,15 @@ func (r *Runtime) LoadAdditional(pkg *compile.Package) error {
 	if !r.post(func() { done <- r.hotReload(pkg, true) }) {
 		return fmt.Errorf("rt: eventloop 未运行")
 	}
-	if err := <-done; err != nil {
-		return err
+	select {
+	case err := <-done:
+		if err != nil {
+			return err
+		}
+		return nil
+	case <-r.closedCh:
+		return fmt.Errorf("rt: 运行时已关闭")
 	}
-	return nil
 }
 
 // hotReload 在 loop goroutine 上组装并执行 HMR 脚本。
@@ -817,6 +850,23 @@ func (r *Runtime) hotReload(newPkg *compile.Package, additional bool) error {
 	for name, code := range newPkg.Modules {
 		if oldCode, existed := oldPkg.Modules[name]; !existed || !bytes.Equal(oldCode, code) {
 			changedMods[name] = true
+		}
+	}
+	// 传递依赖:若 A import 了变更模块 B,则 A 也必须重新定义——否则组件
+	// 重新 adopt 时 require('./A') 仍返回用旧 B 计算出的 exports。
+	expandImporters(newPkg, changedMods)
+	// 依赖发生变化(即使自身脚本未变)的组件也要重跑 setup,才能拿到新导出。
+	adoptSet := map[string]bool{}
+	for _, name := range adopts {
+		adoptSet[name] = true
+	}
+	for _, comp := range newPkg.Components {
+		if _, existed := oldComps[comp.Name]; !existed {
+			continue // 新增组件已在 adopts 里
+		}
+		if changedMods[comp.Module] && !adoptSet[comp.Name] {
+			adopts = append(adopts, comp.Name)
+			adoptSet[comp.Name] = true
 		}
 	}
 
@@ -931,6 +981,30 @@ func newCompByName(pkg *compile.Package, name string) *compile.Component {
 		}
 	}
 	return nil
+}
+
+// expandImporters 把变更集沿「谁 import 了它」反向闭包扩展:
+// 一个模块的依赖变了,它自己也要重新定义,否则 CJS require 会拿到旧 exports。
+func expandImporters(pkg *compile.Package, changed map[string]bool) {
+	for {
+		added := false
+		for name, code := range pkg.Modules {
+			if changed[name] {
+				continue
+			}
+			for _, spec := range scanImports(code) {
+				resolved, ok := pkg.Resolve(name, spec)
+				if ok && resolved != name && changed[resolved] {
+					changed[name] = true
+					added = true
+					break
+				}
+			}
+		}
+		if !added {
+			return
+		}
+	}
 }
 
 // scanImports 从 ESM 源码里扫 import 来源(静态 import/export-from 与动态 import)。

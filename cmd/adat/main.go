@@ -8,13 +8,11 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -54,8 +52,24 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		log.Fatal(err)
+		var ue usageErr
+		if errors.As(err, &ue) {
+			fmt.Fprintln(os.Stderr, err)
+			usage()
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "adat: %v\n", err)
+		os.Exit(1)
 	}
+}
+
+// usageErr 标记用法错误:main 以退出码 2 结束,与编译/运行错误(1)区分。
+type usageErr struct{ msg string }
+
+func (e usageErr) Error() string { return e.msg }
+
+func usageErrorf(format string, args ...any) error {
+	return usageErr{fmt.Sprintf(format, args...)}
 }
 
 // reorderArgs 把「位置参数 + flag」混排重排成 flag 在前
@@ -96,15 +110,19 @@ func usage() {
 	fmt.Print(`adat — 前端式开发 golang native GUI 的运行时编译层
 
 用法:
-  adat lint   <dir>              编译并输出诊断
-  adat build  <dir> [-o out]     产物落盘 + ui.manifest.json(sha256 摘要)
-  adat render <dir>              headless 渲染首帧并打印 widget 树
-  adat run    <dir>              打开 mygo 原生窗口(GPU 绘制)
-  adat watch  <dir>              run + 文件监听热重载(状态保留或重跑 setup)
+  adat lint    <dir>              编译并输出诊断
+  adat build   <dir> [-o out]     产物落盘 + ui.manifest.json(sha256 摘要)
+  adat render  <dir>              headless 渲染首帧并打印 widget 树
+  adat inspect <dir> [-live 2s]   headless 打印 stats 与组件树(可周期刷新)
+  adat run     <dir>              打开 mygo 原生窗口(GPU 绘制)
+  adat watch   <dir>              run + 文件监听热重载(状态保留或重跑 setup)
+  adat version                    版本与 planVersion
 
 .aui 组件 = <template>(Ada 指令) + <script lang="ts">(esbuild 降级)
          + <style scoped>(class→控件属性令牌) + <i18n>($t 查表) + <meta>
 多组件目录加 -entry 指定入口组件(如 examples/chat -entry Chat)
+
+退出码:0 成功 · 1 编译/运行错误 · 2 用法错误
 `)
 }
 
@@ -130,7 +148,7 @@ func cmdLint(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: adat lint <dir>")
+		return usageErrorf("用法: adat lint <dir>")
 	}
 	pkg, err := compileFor(fs.Arg(0), *entry)
 	if err != nil {
@@ -149,7 +167,7 @@ func cmdBuild(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: adat build <dir> [-o out]")
+		return usageErrorf("用法: adat build <dir> [-o out]")
 	}
 	pkg, err := compileFor(fs.Arg(0), *entry)
 	if err != nil {
@@ -180,7 +198,7 @@ func cmdRender(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: adat render <dir>")
+		return usageErrorf("用法: adat render <dir>")
 	}
 	pkg, err := compileFor(fs.Arg(0), *entry)
 	if err != nil {
@@ -229,7 +247,7 @@ func cmdRun(args []string, watch bool) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: adat run <dir>")
+		return usageErrorf("用法: adat run <dir>")
 	}
 	dir := fs.Arg(0)
 
@@ -238,6 +256,9 @@ func cmdRun(args []string, watch bool) error {
 		app, err := buildApp(dir, *entry, *locale, *insp)
 		if err != nil {
 			return err
+		}
+		if *title == "" {
+			*title = app.Pkg().Entry // 与 flag 描述一致:默认入口组件名
 		}
 		if err := app.Window(adat.WindowOptions{Title: *title, Width: *w, Height: *h}); err != nil {
 			return err
@@ -254,22 +275,25 @@ func cmdRun(args []string, watch bool) error {
 	if err != nil {
 		return err
 	}
+	if *title == "" {
+		*title = app.Pkg().Entry
+	}
 	if err := app.Window(adat.WindowOptions{Title: *title, Width: *w, Height: *h}); err != nil {
 		return err
 	}
 	stopWatch := make(chan struct{})
 	go func() {
-		base := dirSignature(dir)
+		base := compile.DirSignature(dir)
 		for {
 			select {
 			case <-stopWatch:
 				return
 			case <-time.After(*interval):
 			}
-			if dirSignature(dir) == base {
+			if compile.DirSignature(dir) == base {
 				continue
 			}
-			base = dirSignature(dir)
+			base = compile.DirSignature(dir)
 			pkg, err := compileFor(dir, *entry)
 			if err != nil {
 				fmt.Printf("[watch] 编译失败(旧世界继续服务):\n%v\n", err)
@@ -297,30 +321,7 @@ func buildApp(dir, entry, locale string, inspector bool) (*adat.App, error) {
 	return adat.NewApp(pkg, adat.AppOptions{
 		Backend:   mygoui.New(),
 		Locale:    locale,
-		Logf:      func(f string, a ...any) { log.Printf("[js] "+f, a...) },
+		Logf:      func(f string, a ...any) { fmt.Fprintf(os.Stderr, "[js] "+f+"\n", a...) },
 		Inspector: inspector,
 	})
-}
-
-// dirSignature 是组件目录里 .aui/.ts/.js 文件的指纹(路径+mtime+大小)。
-func dirSignature(dir string) string {
-	type fv struct {
-		Name string    `json:"n"`
-		Mod  time.Time `json:"m"`
-		Size int64     `json:"s"`
-	}
-	var files []fv
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext == ".aui" || ext == ".ts" || ext == ".js" {
-			files = append(files, fv{path, info.ModTime(), info.Size()})
-		}
-		return nil
-	})
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	b, _ := json.Marshal(files)
-	return string(b)
 }

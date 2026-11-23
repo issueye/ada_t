@@ -26,6 +26,7 @@ let flushScheduled = false
 let renderDepth = 0
 let syncingProps = 0
 let renderStateDirty = false
+let stateDirty = false // 自上次 notify 以来是否发生过真实状态写入
 const dirtyQueue = new Set()
 const targetMap = new WeakMap() // raw target → Map(key → Set<effect>)
 
@@ -33,26 +34,33 @@ function scheduleFlush() {
   if (flushScheduled) return
   flushScheduled = true
   queueMicrotask(flushEffects)
-  // 兜底:任务回调上下文里排队的微任务不被 eventloop drain,
-  // 用定时器保证 flush 最终执行(幂等:先到者清标志)。
+  // 兜底:任务回调上下文里排队的微任务不被 eventloop drain 时,由定时器补一次。
+  // 若微任务已 flush 过,stateDirty 已被消费,这里的二次 flush 不再 notify,
+  // 因此不会产生「一次变更两次整树渲染」。
   setTimeout(flushEffects, 1)
 }
 
 // flushEffects 执行排队的 effect;notifyHost=false 用于「渲染期收集到的依赖」:
 // 当前帧已经包含新值,不需要再通知宿主安排渲染。
+// computed 失效会把下游 effect 重新入队,这里循环到静止再统一 notify,
+// 保证一次状态变更只安排一个渲染 pass。
 function flushEffects(notifyHost = true) {
   flushScheduled = false
-  const list = Array.from(dirtyQueue)
-  dirtyQueue.clear()
-  for (const e of list) {
-    try {
-      e.run()
-    } catch (err) {
-      __adatHost.log('surface: effect 执行异常: ' + (err && err.message ? err.message : String(err)))
+  for (let round = 0; dirtyQueue.size > 0 && round < 100; round++) {
+    const list = Array.from(dirtyQueue)
+    dirtyQueue.clear()
+    for (const e of list) {
+      try {
+        e.run()
+      } catch (err) {
+        __adatHost.log('surface: effect 执行异常: ' + (err && err.message ? err.message : String(err)))
+      }
     }
   }
   // 通知 Go 安排渲染 pass(渲染任务在 loop 队列上,不会与本次 flush 重入)
-  if (notifyHost) __adatHost.notify()
+  if (!notifyHost || !stateDirty) return
+  stateDirty = false
+  __adatHost.notify()
 }
 
 function isRefLike(v) {
@@ -99,6 +107,7 @@ function trigger(target, key) {
     if (syncingProps === 0) renderStateDirty = true
     return
   }
+  stateDirty = true
   scheduleFlush()
 }
 
@@ -120,6 +129,7 @@ function triggerAll(target) {
     renderStateDirty = true
     return
   }
+  stateDirty = true
   scheduleFlush()
 }
 
@@ -193,6 +203,7 @@ function ref(v) {
       if (Object.is(v, nv)) return
       v = nv
       for (const e of deps) dirtyQueue.add(e)
+      stateDirty = true
       scheduleFlush()
     },
   }
@@ -322,6 +333,7 @@ const services = new Map()   // name → { method → 宿主原生函数 } (ctx.
 const eventHandlers = new Map() // event → Set<{inst, fn}>(Go → 组件事件)
 let seq = 0
 let renderGen = 0 // 渲染代数:每轮渲染递增;旧代 handler 渲染后被清扫
+let renderCount = 0 // 渲染 pass 计数(stats 暴露,回归「一次变更一次渲染」)
 let mountingInstance = null
 let currentLocale = 'zh-CN'
 
@@ -551,7 +563,7 @@ function evalExpr(ast, s) {
     case 'lit':
       return ast.v === undefined ? null : ast.v
     case 'arr':
-      return ast.args.map((a) => evalExpr(a, s))
+      return (ast.args || []).map((a) => evalExpr(a, s))
     case 'path': {
       let v = resolveBase(s, ast.p[0].key)
       if (v === undefined) {
@@ -609,15 +621,17 @@ function evalExpr(ast, s) {
     case 'call': {
       // $t 特例:i18n 在 JS 内查表(组件命名空间 → 应用级 → key 本身)
       if (ast.fn.t === 'path' && ast.fn.p.length === 1 && ast.fn.p[0].key === '$t') {
-        const key = String(evalExpr(ast.args[0], s))
-        const args = ast.args.slice(1).map((a) => evalExpr(a, s))
+        const targs = ast.args || []
+        const key = String(evalExpr(targs[0], s))
+        const args = targs.slice(1).map((a) => evalExpr(a, s))
         return tLookup(s.inst ? s.inst.id : '', key, args)
       }
       const fn = evalExpr(ast.fn, s)
       if (typeof fn !== 'function') {
         throw new Error('surface: 调用目标不是函数: ' + pathString(ast.fn))
       }
-      return fn.apply(null, ast.args.map((a) => evalExpr(a, s)))
+      // 零参调用在 Go 侧被 omitempty 省略(ast.args 缺失),按空参数处理。
+      return fn.apply(null, (ast.args || []).map((a) => evalExpr(a, s)))
     }
   }
   throw new Error('surface: 未知表达式类型 ' + ast.t)
@@ -641,7 +655,7 @@ function evalAction(action, s) {
       if (typeof fn !== 'function') {
         throw new Error('surface: 动作不是函数: ' + pathString(action.fn))
       }
-      fn.apply(null, action.args.map((a) => evalExpr(a, s)))
+      fn.apply(null, (action.args || []).map((a) => evalExpr(a, s)))
       return
     }
     case 'assign': {
@@ -895,8 +909,9 @@ function renderComp(node, s) {
   }
   if (node.props !== undefined) {
     for (const k in node.props) {
-      const v = evalExpr(node.props[k], s)
-      if (v !== undefined) propsObj[k] = v
+      // undefined 也要写入:否则 prop 变成 undefined 时子实例会保留旧值
+      // (例如 a-prop:selected="state.sel" 中 sel 被清空)。
+      propsObj[k] = evalExpr(node.props[k], s)
     }
   }
   // 事件:登记到 handlers,父子 emit 关联
@@ -932,6 +947,9 @@ function renderComp(node, s) {
       for (const k in propsObj) {
         const nv = unwrapDeep(propsObj[k])
         if (!Object.is(unwrapDeep(inst.props[k]), nv)) inst.props[k] = nv
+      }
+      for (const k in inst.props) {
+        if (!(k in propsObj)) delete inst.props[k]
       }
     } finally {
       syncingProps--
@@ -1009,16 +1027,19 @@ function renderWindow(winId) {
   const plan = plans.get(inst.name)
   if (plan === undefined) throw new Error('surface: 组件 ' + inst.name + ' 没有 Plan')
   renderGen++
+  renderCount++
   renderDepth++
   const visited = new Set([inst.id])
   currentVisited = visited
   let tree
+  let rendered = false
   try {
     if (inst.error !== undefined) {
       tree = errorTree(inst.name, inst.error, '装配')
     } else {
       try {
         tree = renderPlanTree(plan.root, { inst, frames: [inst.scope, { props: inst.props }, inst.props], path: 'r', keyChain: [] })
+        rendered = true
       } catch (err) {
         const msg = err && err.message ? err.message : String(err)
         __adatHost.log('surface: 渲染失败(' + inst.name + '): ' + msg)
@@ -1027,7 +1048,9 @@ function renderWindow(winId) {
         currentVisited = null
       }
     }
-    sweepChildren(inst, visited)
+    // 渲染成功才清扫未访问的子实例。渲染抛错时保留上一帧的子实例与内部状态,
+    // 否则一次瞬时数据错误会把整窗子组件卸载、恢复后状态全丢。
+    if (rendered) sweepChildren(inst, visited)
     // 清扫:只回收「本窗口的旧代 handler」——多窗口同轮渲染时,
     // 后渲染的窗口不能删掉先渲染窗口的 handler。
     for (const [hid, h] of Array.from(handlers.entries())) {
@@ -1042,6 +1065,7 @@ function renderWindow(winId) {
       // 当前树可能已经过期,补一轮渲染。
       if (renderStateDirty) {
         renderStateDirty = false
+        stateDirty = true
         scheduleFlush()
       }
     }
@@ -1188,6 +1212,7 @@ export function stats() {
     eventSubs: subs,
     windows: windows.size,
     seq,
+    renders: renderCount,
   })
 }
 

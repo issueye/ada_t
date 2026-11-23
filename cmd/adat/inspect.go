@@ -26,7 +26,7 @@ func cmdInspect(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: adat inspect <dir> [-entry X] [-live 2s]")
+		return usageErrorf("用法: adat inspect <dir> [-entry X] [-live 2s]")
 	}
 
 	pkg, err := compileFor(fs.Arg(0), *entry)

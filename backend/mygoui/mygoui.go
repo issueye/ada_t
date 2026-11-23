@@ -19,6 +19,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/issueye/ada_t/backend"
+	"github.com/issueye/ada_t/internal/colorval"
 	"github.com/issueye/ada_t/widget"
 )
 
@@ -57,16 +58,30 @@ var (
 )
 
 // Apply 保存窗口最新树并请求重绘(Invalidate 协程安全)。
+// tree == nil 表示窗口已移除:删除树与注册,并关闭原生窗口
+// (契约见 backend.Backend.Apply;rt.UnmountWindow 会发 nil 树)。
 func (b *Backend) Apply(winID string, tree *widget.Node) {
 	b.mu.Lock()
-	b.trees[winID] = tree
+	if tree == nil {
+		delete(b.trees, winID)
+	} else {
+		b.trees[winID] = tree
+	}
 	b.mu.Unlock()
 	regMu.Lock()
 	w := windowReg[winID]
-	regMu.Unlock()
-	if w != nil {
-		w.Invalidate()
+	if tree == nil {
+		delete(windowReg, winID)
 	}
+	regMu.Unlock()
+	if w == nil {
+		return
+	}
+	if tree == nil {
+		w.Close()
+		return
+	}
+	w.Invalidate()
 }
 
 // Run 启动 mygo 应用并阻塞(占主线程)。
@@ -149,7 +164,7 @@ func newWinInput() *winInput {
 		texts: map[string]*string{}, nums: map[string]*float64{}, bools: map[string]*bool{},
 		idxs: map[string]*int{}, f32s: map[string]*float32{}, lists: map[string]*ui.ListState{},
 		sText: map[string]string{}, sNum: map[string]float64{}, sBool: map[string]bool{},
-		sIdx: map[string]int{},
+		sIdx: map[string]int{}, sF32: map[string]float32{},
 	}
 }
 
@@ -285,7 +300,10 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 				replay(c, ch, winID, in, fire)
 			}
 		})
-		if el.Clicked() {
+		// 只有显式绑定 click 的容器才注册可点击命中。若无条件调用 Clicked(),
+		// 每个布局容器都会成为最内层命中目标,吞掉外层容器的点击
+		// (如 Sidebar 的会话行:Row[click] > Column > Text)。
+		if n.Events["click"] != "" && el.Clicked() {
 			fireClick(n, winID, fire)
 		}
 		return el
@@ -299,6 +317,11 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		}
 		if v, ok := n.Props["color"].(string); ok {
 			el = el.TextColor(parseColor(v))
+		}
+		// align 对 Text 是行内文本对齐(TextAlign);applyLayout 的 AlignItems
+		// 是子项对齐,对没有子节点的 Text 无效。
+		if v, ok := n.Props["align"].(string); ok {
+			el = el.TextAlign(parseAlign(v))
 		}
 		return applyLayout(el, n.Props)
 	case "Button":
@@ -321,7 +344,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		if v, ok := n.Props["placeholder"].(string); ok {
 			el = el.Placeholder(v)
 		}
-		el = applySize(el, n.Props)
+		el = applyLayout(el, n.Props)
 		// 回车提交(a-on:submit):Submitted 是本帧内的查询
 		if el.Submitted() {
 			fireEvent(n, winID, "submit", map[string]any{"value": *ptr}, fire)
@@ -340,7 +363,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 			step = v
 		}
 		ptr := in.syncNum(key, numProp(n.Props, "value"), func(p any) { fireEvent(n, winID, "input", p, fire) })
-		return applySize(ui.NumberInput(c, ptr, lo, hi, step), n.Props)
+		return applyLayout(ui.NumberInput(c, ptr, lo, hi, step), n.Props)
 	case "Switch":
 		key := modelKeyOr(n, "bool:")
 		ptr := in.syncBool(key, propBool(n.Props, "checked"), func(p any) { fireEvent(n, winID, "change", p, fire) })
@@ -350,7 +373,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		ptr := in.syncBool(key, propBool(n.Props, "checked"), func(p any) { fireEvent(n, winID, "change", p, fire) })
 		return ui.Checkbox(c, ptr, n.Text())
 	case "Progress":
-		return applySize(ui.Progress(c, numProp(n.Props, "value")), n.Props)
+		return applyLayout(ui.Progress(c, numProp(n.Props, "value")), n.Props)
 	case "Slider":
 		// 数值滑杆:拖动经 Changed 帧查询回传 input 事件
 		key := modelKeyOr(n, "num:")
@@ -362,7 +385,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 			hi = v
 		}
 		ptr := in.syncNum(key, numProp(n.Props, "value"), nil)
-		el := applySize(ui.Slider(c, ptr, lo, hi), n.Props)
+		el := applyLayout(ui.Slider(c, ptr, lo, hi), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "input", map[string]any{"value": *ptr}, fire)
 		}
@@ -381,7 +404,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 			step = v
 		}
 		ptr := in.syncNum(key, numProp(n.Props, "value"), nil)
-		el := applySize(ui.Stepper(c, ptr, lo, hi, step), n.Props)
+		el := applyLayout(ui.Stepper(c, ptr, lo, hi, step), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "input", map[string]any{"value": *ptr}, fire)
 		}
@@ -414,9 +437,9 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		ptr := in.syncIdx(key, idx, nil)
 		var el ui.Element
 		if n.Tag == "Segmented" {
-			el = applySize(ui.Segmented(c, ptr, labels...), n.Props)
+			el = applyLayout(ui.Segmented(c, ptr, labels...), n.Props)
 		} else {
-			el = applySize(ui.Tabs(c, ptr, labels...), n.Props)
+			el = applyLayout(ui.Tabs(c, ptr, labels...), n.Props)
 		}
 		if el.Changed() {
 			fireChoice(*ptr)
@@ -498,7 +521,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 		s.FollowEnd = propBool(n.Props, "follow-end")
 		selPtr := in.syncIdx(key+"", int(numProp(n.Props, "selected")), nil)
 		s.Selected = selPtr
-		el := applySize(ui.Table(c, s, cols, len(rows), func(row int, col int) {
+		el := applyLayout(ui.Table(c, s, cols, len(rows), func(row int, col int) {
 			if row < 0 || row >= len(rows) || col < 0 || col >= len(fields) {
 				return
 			}
@@ -522,7 +545,7 @@ func replayEl(c *ui.Context, n *widget.Node, winID string, in *winInput, fire ba
 			maxStars = v
 		}
 		ptr := in.syncIdx(key, int(numProp(n.Props, "selected")), nil)
-		el := applySize(ui.Rating(c, ptr, int(maxStars)), n.Props)
+		el := applyLayout(ui.Rating(c, ptr, int(maxStars)), n.Props)
 		if el.Changed() {
 			fireEvent(n, winID, "change", map[string]any{"value": *ptr}, fire)
 		}
@@ -651,11 +674,16 @@ func parseAlign(s string) ui.Align {
 	return ui.Start
 }
 
-// parseColor 支持 #rgb/#rrggbb 与有限命名色(令牌化之前的过渡)。
+// parseColor 支持 #rgb/#rgba/#rrggbb/#rrggbbaa 与有限命名色(令牌化之前的过渡)。
+// 非法 #hex 在编译期已拒绝;这里再兜底一次,避免 ui.Hex panic 带走主线程
+// (动态 a-bind 的颜色值绕过了编译期校验)。
 func parseColor(s string) ui.Color {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "#") {
-		return ui.Hex(s)
+		if colorval.ValidHex(s) {
+			return ui.Hex(s)
+		}
+		return ui.RGB(130, 130, 130)
 	}
 	switch strings.ToLower(s) {
 	case "white":

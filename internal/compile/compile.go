@@ -18,11 +18,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/issueye/ada_t/internal/expr"
@@ -182,6 +184,38 @@ func qualifyWarns(file string, warns []templatec.Diagnostic) []string {
 	return out
 }
 
+// scriptDiagnostic 把 esbuild 的逐条诊断从「<script> 块体坐标」换算到源文件坐标,
+// 避免 CLI 报虚拟模块名与块内行号。
+func scriptDiagnostic(file string, bodyLine int, err error) error {
+	var se *scriptc.Error
+	if !errors.As(err, &se) {
+		return fmt.Errorf("compile: %s: %w", file, err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "compile: %s: ESBUILD: TS/JS 降级错误", file)
+	for _, m := range se.Messages {
+		if m.Location != nil {
+			fmt.Fprintf(&b, "\n  %s:%d:%d: %s", file, bodyLine+m.Location.Line-1, m.Location.Column, m.Text)
+		} else {
+			b.WriteString("\n  " + m.Text)
+		}
+	}
+	return errors.New(b.String())
+}
+
+// styleDiagnostic 把样式错误从「<style> 块体坐标」换算到源文件坐标。
+func styleDiagnostic(file string, bodyLine int, err error) error {
+	var se *stylec.Error
+	if !errors.As(err, &se) {
+		return fmt.Errorf("compile: %s: %w", file, err)
+	}
+	line := se.Line
+	if line > 0 {
+		line += bodyLine - 1
+	}
+	return fmt.Errorf("compile: %s:%d: EUISTYLE: %s", file, line, se.Message)
+}
+
 // compileComponent 编译单个 .aui。
 func compileComponent(file, src string, p *Package) (*Component, []templatec.Diagnostic, error) {
 	sf, err := sfc.Split(src)
@@ -224,6 +258,12 @@ func compileComponent(file, src string, p *Package) (*Component, []templatec.Dia
 		}
 		return nil, nil, fmt.Errorf("compile: %s: %w", file, err)
 	}
+	// 告警行号与模板体一致(相对 <template> 块首),回填块偏移,让 CLI 指向源文件。
+	for i := range warns {
+		if warns[i].Line > 0 {
+			warns[i].Line += sf.Template.Line - 1
+		}
+	}
 	planJSON, err := json.Marshal(plan)
 	if err != nil {
 		return nil, nil, fmt.Errorf("compile: %s: Plan 序列化失败: %w", file, err)
@@ -247,7 +287,7 @@ func compileComponent(file, src string, p *Package) (*Component, []templatec.Dia
 		modName := file + ".js"
 		res, err := scriptc.TransformWith(modName, []byte(sf.Script.Body), loader)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, scriptDiagnostic(file, sf.Script.Line, err)
 		}
 		comp.Module = modName
 		comp.Script = res.Code
@@ -262,7 +302,7 @@ func compileComponent(file, src string, p *Package) (*Component, []templatec.Dia
 	if sf.Has("style") && sf.Style.Body != "" {
 		tokens, err := stylec.Compile(sf.Style.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("compile: %s: %w", file, err)
+			return nil, nil, styleDiagnostic(file, sf.Style.Line, err)
 		}
 		comp.Style = tokens
 	}
@@ -377,6 +417,31 @@ func joinPath(a, b string) string {
 		return b
 	}
 	return a + "/" + b
+}
+
+// DirSignature 返回组件目录的变更指纹(路径 + mtime + 大小),供
+// app.WatchDir / adat watch 这类轮询热重载使用。扩展名集合与 CompileDir
+// 的可编译输入保持一致(.aui/.ts/.tsx/.js/.mjs)。
+func DirSignature(dir string) string {
+	type fv struct {
+		Name string    `json:"n"`
+		Mod  time.Time `json:"m"`
+		Size int64     `json:"s"`
+	}
+	var files []fv
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".aui", ".ts", ".tsx", ".js", ".mjs":
+			files = append(files, fv{path, info.ModTime(), info.Size()})
+		}
+		return nil
+	})
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	b, _ := json.Marshal(files)
+	return string(b)
 }
 
 // —— 产物落盘与校验(§5.6 简化版) ——

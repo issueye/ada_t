@@ -294,6 +294,14 @@ func TestModelSplitNumber(t *testing.T) {
 	}
 }
 
+// TestEventModifiersRejected:修饰符没有 native 语义,不能静默编译进 Plan。
+func TestEventModifiersRejected(t *testing.T) {
+	_, _, err := Compile(`<Column><Button a-on:click.stop="go">B</Button></Column>`, Options{})
+	if err == nil || !strings.Contains(err.Error(), "修饰符") {
+		t.Fatalf("事件修饰符应被拒绝: %v", err)
+	}
+}
+
 func TestDuplicateEventHandler(t *testing.T) {
 	_, _, err := Compile(`<Column><Button a-on:click="a" a-on:click="b">x</Button></Column>`, Options{})
 	if err == nil || !strings.Contains(err.Error(), "重复的事件") {
@@ -308,5 +316,78 @@ func TestSubmitOnlyTextInput(t *testing.T) {
 	}
 	if _, _, err := Compile(`<Column><TextInput a-on:submit="go" /></Column>`, Options{}); err != nil {
 		t.Fatalf("TextInput submit 应通过: %v", err)
+	}
+}
+
+// TestRejectInvalidHexColor:静态 #hex 在编译期拒绝,避免重放层 panic。
+func TestRejectInvalidHexColor(t *testing.T) {
+	for _, src := range []string{
+		`<Column><Text color="#12">t</Text></Column>`,
+		`<Column><Text color="#ggg">t</Text></Column>`,
+		`<Column fill background="#12345"><Text>t</Text></Column>`,
+	} {
+		if _, _, err := Compile(src, Options{}); err == nil {
+			t.Errorf("%q 应因非法颜色被拒绝", src)
+		}
+	}
+	if _, _, err := Compile(`<Column><Text color="#abc">t</Text></Column>`, Options{}); err != nil {
+		t.Fatalf("合法颜色应通过: %v", err)
+	}
+	if _, _, err := Compile(`<Column><Text color="gray">t</Text></Column>`, Options{}); err != nil {
+		t.Fatalf("命名色应通过: %v", err)
+	}
+}
+
+// TestComponentTagRejectsDirectives:组件标签不能绕过指令/安全校验。
+func TestComponentTagRejectsDirectives(t *testing.T) {
+	cases := map[string]string{
+		`<Sub a-html="x" />`:     "EUISECURITY",
+		`<Sub onclick="x" />`:    "EUISECURITY",
+		`<Sub a-ref="x" />`:      "EUISECURITY",
+		`<Sub a-class:on="x" />`: "EUITEMPLATE",
+	}
+	for tag, code := range cases {
+		_, _, err := Compile(`<Column>`+tag+`</Column>`, Options{})
+		if err == nil {
+			t.Errorf("%s 应被拒绝", tag)
+			continue
+		}
+		if !strings.Contains(err.Error(), code) {
+			t.Errorf("%s 应报 %s,得到 %v", tag, code, err)
+		}
+	}
+	if _, _, err := Compile(`<Column><Sub foo="1" /></Column>`, Options{}); err != nil {
+		t.Fatalf("普通静态 prop 应通过: %v", err)
+	}
+}
+
+// TestKeyWithoutForRejected:a-key 必须与 a-for 搭配(否则会静默进 Plan 而无人消费)。
+func TestKeyWithoutForRejected(t *testing.T) {
+	_, _, err := Compile(`<Column><Text a-key="state.k">t</Text></Column>`, Options{})
+	if err == nil || !strings.Contains(err.Error(), "a-key 只能") {
+		t.Fatalf("孤立 a-key 应拒绝: %v", err)
+	}
+	if _, _, err := Compile(`<Column><Row a-for="x in xs" a-key="x"><Text>t</Text></Row></Column>`, Options{}); err != nil {
+		t.Fatalf("a-for + a-key 应通过: %v", err)
+	}
+}
+
+// TestMalformedNumberStaysString:畸形数字属性不再被 Sscanf 截断成 float。
+func TestMalformedNumberStaysString(t *testing.T) {
+	plan := compileOK(t, `<Column gap="1.2.3"><Text>x</Text></Column>`)
+	attrs := plan["root"].(map[string]any)["attrs"].(map[string]any)
+	if attrs["gap"] != "1.2.3" {
+		t.Fatalf("gap = %#v, want 字符串 \"1.2.3\"", attrs["gap"])
+	}
+}
+
+// TestExprErrorUsesEUIEXPR:表达式错误保留自己的诊断码,而不是混进 EUITEMPLATE。
+func TestExprErrorUsesEUIEXPR(t *testing.T) {
+	_, _, err := Compile(`<Column><Text a-if="a + ">t</Text></Column>`, Options{})
+	if err == nil {
+		t.Fatal("非法表达式应报错")
+	}
+	if !strings.Contains(err.Error(), "EUIEXPR") {
+		t.Fatalf("表达式错误应报 EUIEXPR,得到 %v", err)
 	}
 }

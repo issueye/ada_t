@@ -116,6 +116,64 @@ func TestCompileDirRequiresEntryForMultipleAUI(t *testing.T) {
 	}
 }
 
+// TestWarningUsesFileCoordinates:模板告警也要回填 <template> 块偏移。
+func TestWarningUsesFileCoordinates(t *testing.T) {
+	src := `<template>
+  <Column>
+    <Row a-for="x in xs"><Text>{{ x }}</Text></Row>
+  </Column>
+</template>`
+	pkg, err := CompileFiles("W.aui", map[string]string{"W.aui": src}, Options{})
+	if err != nil {
+		t.Fatalf("编译: %v", err)
+	}
+	if len(pkg.Warnings) == 0 {
+		t.Fatal("缺 a-key 应产生告警")
+	}
+	// a-for 在源文件第 3 行;修复前会报成 template 内的第 2 行。
+	if !strings.Contains(pkg.Warnings[0], "W.aui:3:") {
+		t.Fatalf("告警应使用源文件行号: %v", pkg.Warnings)
+	}
+}
+
+// TestScriptErrorUsesFileCoordinates:esbuild 诊断换算到 .aui 源文件坐标。
+func TestScriptErrorUsesFileCoordinates(t *testing.T) {
+	src := `<template><Column><Text>x</Text></Column></template>
+
+<script lang="ts">
+export default {
+  setup() {
+    const = 1
+  },
+}
+</script>`
+	_, err := CompileFiles("E.aui", map[string]string{"E.aui": src}, Options{})
+	if err == nil {
+		t.Fatal("语法错误应报错")
+	}
+	if !strings.Contains(err.Error(), "E.aui:6:") || strings.Contains(err.Error(), ".aui.js:") {
+		t.Fatalf("脚本诊断应使用源文件坐标(第 6 行): %v", err)
+	}
+}
+
+// TestStyleErrorUsesFileCoordinates:样式诊断换算到 .aui 源文件坐标。
+func TestStyleErrorUsesFileCoordinates(t *testing.T) {
+	src := `<template><Column><Text>x</Text></Column></template>
+
+<style scoped>
+.x {
+  color: #12;
+}
+</style>`
+	_, err := CompileFiles("F.aui", map[string]string{"F.aui": src}, Options{})
+	if err == nil {
+		t.Fatal("非法颜色应报错")
+	}
+	if !strings.Contains(err.Error(), "F.aui:5:") || !strings.Contains(err.Error(), "EUISTYLE") {
+		t.Fatalf("样式诊断应使用源文件坐标(第 5 行): %v", err)
+	}
+}
+
 func TestDiagnosticLineUsesFileCoordinates(t *testing.T) {
 	src := `<meta>
 { "name": "L" }

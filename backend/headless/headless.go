@@ -22,6 +22,7 @@ type Backend struct {
 	dispatch backend.DispatchFunc
 	running  bool
 	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // New 创建 headless 后端。
@@ -58,15 +59,13 @@ func (b *Backend) Run(windows []backend.WindowSpec) error {
 	return nil
 }
 
-// Stop 退出 Run。可重复调用。
+// Stop 退出 Run。可重复调用;在 Run 之前调用也安全(Run 会立即返回),
+// 不会留下一个永远等不到信号的阻塞。
 func (b *Backend) Stop() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.running {
-		return nil
-	}
 	b.running = false
-	close(b.stopCh)
+	b.mu.Unlock()
+	b.stopOnce.Do(func() { close(b.stopCh) })
 	return nil
 }
 
