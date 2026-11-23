@@ -48,6 +48,6 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race (core)
-        run: go test -race . ./internal/... ./widget ./backend/headless
+        run: go test -race . ./internal/... ./widget ./backend/headless ./backend/mygoui ./cmd/adat
       - name: Benchmark smoke
         run: go test ./internal/rt -run "^$" -bench BenchmarkRenderList100 -benchtime=1x

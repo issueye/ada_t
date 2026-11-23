@@ -30,13 +30,18 @@
 | `a-class:active="state.on"` | 动态 class(配样式令牌) |
 | `a-prop:label="state.label"` | 子组件 props |
 
+约定:`a-key` 只能与 `a-for` 一起使用;组件标签只接受静态 prop 与 `a-prop:`/`a-on:`
+(组件上的 `a-html`/`a-ref`/`on*` 会被拒绝);动态 class 只作用于原生控件。
+
 静态文本与静态属性支持 HTML 实体:`&amp;` `&lt;` `&gt;` `&quot;` `&apos;` `&nbsp;`,
 以及数字实体 `&#65;` / `&#x1F600;`;表达式与指令值内不解码。
 
 ## 表达式
 
-字面量 · 路径/下标 · `!`/`-` · `+ - * / %` · `==`(严格)· `< > <= >=` · `&&` `||` `??` · 三元 · 数组 · 括号 · 函数调用(作用域内)· `$t(key, ...)`。
+字面量 · 路径/下标 · `!`/`-` · `+ - * / %` · `==`(严格)· `< > <= >=` · `&&` `||` `??` · 三元 · 数组 · 括号 · 函数调用(作用域内,含零参 `now()`)· `$t(key, ...)`。
 ref/computed 在表达式根部自动解包;赋值/`new`/`this`/链式调用禁止。
+`a-for` 遍历数组得到元素;遍历对象得到**键名**(与 Vue 的取值语义不同)。
+组件标签名 = 子组件编译后的名字(`<meta>` name 或文件名),不是 import 别名。
 
 ## setup 契约
 
@@ -68,7 +73,7 @@ export default {
 ### 布局
 | 控件 | 属性 | 说明 |
 |---|---|---|
-| `Column` / `Row` | fill / fill-x / fill-y / center / gap / padding / grow / align / justify / background / radius | 容器(click 可用) |
+| `Column` / `Row` | fill / fill-x / fill-y / center / gap / gap-x / gap-y / padding / grow / align / justify / background / radius | 容器;仅绑定 `a-on:click` 时参与点击命中 |
 | `Scroll` | grow(填满) | 垂直滚动容器 |
 | `Spacer` / `Divider` | — | 占位/分隔 |
 | `Split` | size(第一面板宽,a-model 双向)/ vertical | 可拖拽分栏;恰好两个子节点 |
@@ -76,7 +81,7 @@ export default {
 ### 文本
 | 控件 | 属性 |
 |---|---|
-| `Text` | 内容(子文本)/ font-size / bold / color / align |
+| `Text` | 内容(子文本)/ font-size / bold / color / align(行内对齐 start/center/end)/ padding / grow |
 
 ### 按钮
 | 控件 | 事件 |
@@ -164,7 +169,7 @@ adat lint <dir>                  # 编译诊断(EUISTRUCT/EUITEMPLATE/EUIEXPR/EU
 adat render <dir> -entry X       # headless 首帧树
 adat inspect <dir> -entry X -live 2s   # headless 持续检查(stats + 树)
 ADAT_INSPECT=1 go run <main>     # 运行期周期转储到终端
-adat watch <dir> -entry X        # 热重载(模板变状态保留;脚本变重跑 setup)
+adat watch <dir> -entry X        # 热重载(模板变状态保留;脚本/依赖变重跑 setup)
 ```
 
 常见错误:`EUISTRUCT` 结构 · `EUITEMPLATE` 指令/标签/属性 · `EUIEXPR` 表达式 ·

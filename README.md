@@ -82,7 +82,8 @@
    (与 §5.2 一致)。
 3. **`onMount` 在 setup 完成后立即执行**(无首帧前/后区分):native 组件没有「挂载到 DOM」的时点。
 4. **a-model 目标只允许点路径**(拒绝下标):输入绑定键要跨帧稳定(后端持指针)。
-5. **热重载(运行时编译)重建整个 JS 世界,状态重置**:组件级 HMR 是未来项(对齐 §16「不许做」的边界感)。
+5. **热重载按「数据 / 脚本」分流**:模板、样式、i18n 变更只换数据,实例与状态完整保留;脚本变更
+   (含其依赖模块变更)重跑受影响组件的 setup。需要整体重置时重建 App(旧实例 Close),不做原地换世界。
 
 ## 2. 快速上手
 
@@ -102,9 +103,11 @@ go run ./examples/chat
 # 演示驱动:模拟联系人陆续发来消息(看实时气泡与未读徽标)
 ADAT_CHAT_DEMO=1 go run ./examples/chat
 
-// 运行期检查器:每 2 秒向终端转储 stats 与各窗口 widget 树
+# 运行期检查器:每 2 秒向终端转储 stats 与各窗口 widget 树
 ADAT_INSPECT=1 go run ./examples/chat
 ```
+
+> Windows PowerShell 用 `$env:ADAT_INSPECT=1; go run ./examples/chat`,CMD 用 `set ADAT_INSPECT=1 && ...`。
 
 > 目录内有多个 `.aui` 时,CLI 必须用 `-entry`(或 `compile.Options.Entry`)指定入口;
 > 未指定会直接报错,而不是猜测第一个文件。
@@ -122,6 +125,7 @@ ADAT_CHAT_WATCH=1 ADAT_CHAT_DEMO=1 go run ./examples/chat   # 示例自带 watch
 |---|---|
 | 模板 / 样式 / i18n | 只换数据,实例与状态**完整保留**,下一帧生效 |
 | 脚本 | 重跑受影响组件的 setup(props 保留,组件内部状态重置),窗口不关 |
+| 被导入的模块(.ts/.js) | 变更沿 import 反向闭包传播:受影响模块与其导入者重新定义,相关组件重跑 setup |
 | 新增组件 | 热装载并可立即使用 |
 | 编译失败 | 旧世界继续服务,错误打在终端 |
 
@@ -131,8 +135,9 @@ ADAT_CHAT_WATCH=1 ADAT_CHAT_DEMO=1 go run ./examples/chat   # 示例自带 watch
 先编译后执行——编译失败旧世界不受影响。
 
 宿主程序接入:`app.HotReload(pkg)`(任意 goroutine)+ `adat.WatchDir(dir, entry, interval, onPkg)`
-监听辅助。已知限制:脚本未变的组件不重载——若其依赖的相对模块变了,同时改一下该组件脚本
-(加个注释)即可触发其重载;循环导入的 CJS 工厂按惰性语义执行,极端循环场景未承诺。
+监听辅助。依赖传播覆盖包内的静态 import 闭包(含组件脚本);循环导入的 CJS 工厂按惰性语义执行,
+极端循环场景未承诺;`scanImports` 是词法扫描,注释/字符串里形如 import 的文本可能被误判为依赖
+(只会导致多定义一次,不会错更新)。
 
 ## 截图
 
@@ -174,25 +179,29 @@ ADAT_CHAT_WATCH=1 ADAT_CHAT_DEMO=1 go run ./examples/chat   # 示例自带 watch
 
 | 标签 | 关键属性 | 事件 |
 |---|---|---|
-| Column / Row | fill / center / gap / padding / grow / align / justify / background / radius | click |
-| Scroll | grow(填满剩余空间) | — |
-| Text | text(内容)/ font-size / bold / color | — |
-| Button / PrimaryButton | label(子文本) | click |
-| TextInput | a-model 文本 / placeholder | input、submit(回车) |
-| NumberInput | a-model 数值 / min / max / step | input |
-| Slider | a-model 数值 / min / max | input(拖动) |
-| Stepper | a-model 数值 / min / max / step | input |
-| Segmented | a-model = 选中项文本 / options="小,中,大" | change |
-| Tabs | a-model = 选中项文本 / options="页1,页2" | change(配合 a-if 切换内容面板) |
+| Column / Row | fill / fill-x / fill-y / center / gap / gap-x / gap-y / padding / width / height / grow / align / justify / background / radius | click(仅绑定了 click 的容器参与命中,不吞子级点击) |
+| Scroll | fill / grow(填满剩余空间) | — |
+| Text | text(内容)/ font-size / bold / color / align(行内对齐)/ width / height / grow / padding | — |
+| Button / PrimaryButton | label(子文本)/ width / height / grow | click |
+| TextInput | a-model 文本 / placeholder / grow | input、submit(回车) |
+| NumberInput | a-model 数值 / min / max / step / grow | input |
+| Slider | a-model 数值 / min / max / grow | input(拖动) |
+| Stepper | a-model 数值 / min / max / step / grow | input |
+| Segmented | a-model = 选中项文本 / options="小,中,大" / fill-x / grow | change |
+| Tabs | a-model = 选中项文本 / options="页1,页2" / fill-x / grow | change(配合 a-if 切换内容面板) |
 | Split | a-model = 第一面板宽度(DIP,可拖拽双向)/ vertical 上下分栏 | input |
 | Switch / Checkbox | a-model 布尔 / label | change |
 | AlertDialog | a-model 开关(双向)/ title / message / buttons="取消,确定" | action({index,label})、dismiss |
-| Progress | value / width | — |
+| Progress | value / width / grow | — |
 | Table | a-model = 选中行下标 / a-bind:rows = 行对象数组 / columns="标题1,标题2" / fields="字段1,字段2" / follow-end 贴底 | change({value}) |
+| Rating | a-model = 星数(int)/ max | change({value}) |
 | Spacer / Divider | — | — |
 
 约定:大写自定义组件名不能与内置控件重名(重名会被当成内置控件);表单控件的值
-经后端双向同步(用户编辑实时回传,JS 更新实时下发)。
+经后端双向同步(用户编辑实时回传,JS 更新实时下发)。所有布局属性
+(fill/grow/padding…)对输入与选择类控件同样生效,`Text` 的 `align` 映射为行内文本对齐。
+颜色值支持 `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` 与有限命名色,非法 `#hex` 在编译期报
+`EUISTYLE`/`EUITEMPLATE`(动态 `a-bind` 由重放层兜底)。
 
 ## 调试面板(Inspector)
 
@@ -334,9 +343,10 @@ ctx.on('tick', (p) => { state.ticks = p.n })  // 订阅广播;实例卸载自动
 三元、数组、括号、作用域内函数调用与 `$t`。拒绝赋值、`new`、`this`、`await`、链式调用。
 根表达式是 ref/computed 时自动解包一层。
 
-**控件词表**(native 标签)与属性白名单见 `internal/templatec/templatec.go` 的 `nativeTags`:
-Column/Row(布局)/Text/Button/PrimaryButton/TextInput/NumberInput/Switch/Checkbox/Progress/Spacer/Divider。
-新控件 = 加一行白名单 + mygoui 重放分支。
+**控件词表**(native 标签,21 个)与属性白名单见 `internal/templatec/templatec.go` 的 `nativeTags`:
+布局 Column/Row/Scroll/Split;文本 Text;按钮 Button/PrimaryButton;输入 TextInput/NumberInput/Slider/Stepper;
+选择 Segmented/Tabs/Table/Rating/Switch/Checkbox;反馈 AlertDialog/Progress;占位 Spacer/Divider。
+可双向绑定的控件另受 `modelTags` 约束。新增控件 = 白名单 + `modelKind`(若可绑定)+ mygoui 重放分支 + 重放测试。
 
 **诊断码**(附录 A 子集):`EUISTRUCT`(切块/结构)、`EUITEMPLATE`(指令/标签/属性)、`EUIEXPR`(表达式)、
 `EUISTYLE`(样式)、`EUISECURITY`(on*/a-html)、`EUIIMPORT`(裸包名/越界导入,Link 时)、`EUIARTIFACT`(产物摘要)。
@@ -346,7 +356,10 @@ Column/Row(布局)/Text/Button/PrimaryButton/TextInput/NumberInput/Switch/Checkb
 moejs Runtime 只能在专属 goroutine 上使用。本层:
 
 - `eventloop.Loop`(专属 goroutine,`Start()` 一直跑到 `Stop`):所有 JS 交互(装配、渲染 pass、事件求值、
-  定时器)都经 `RunOnLoop` 投递;JS 里没有阻塞宿主的路径。
+  定时器)都经 `RunOnLoop` 投递。同步服务(`ctx.api.call`)与 `OnTree` 回调在 loop 上执行,慢调用会阻塞
+  渲染——长任务用 `callAsync`;在 loop 回调里再调 `Stats/MountWindow/HotReload` 等往返 API 会自锁。
+- 关闭协议:`Close` 先关闭内部 `closedCh` 再 `loop.Stop()`,等待 loop 的调用方立即返回错误,
+  不会因 Stop 丢弃未执行任务而永久阻塞。
 - mygo 主线程:每帧 view 重放(只读快照);`Clicked()`/输入差异经 Dispatch → `rt.Fire` 投递回 loop。
 - `notify` 合帧:响应式 flush → 原生函数 → Go `notifyPending` CAS → 一个 loop 轮次最多一个渲染 pass。
 - 渲染输出是 JSON 字符串跨边界;handler 用 id 注册表回指,跨边界不传函数。
@@ -374,16 +387,18 @@ dist/ui/
 | 模板 | `internal/templatec/templatec_test.go` | if 链归一、for 包裹、裸文本包 Text、词间空白、a-model(控件白名单/事件冲突)、安全拒绝、根约束、告警、id 稳定 |
 | 样式 | `internal/stylec/stylec_test.go` | 令牌、@规则/全局选择器/url()/白名单外属性/重复规则拒绝 |
 | 降级 | `internal/scriptc/scriptc_test.go` | TS 擦除 + enum 内联、语法错误、loader 选择 |
-| 编译 | `internal/compile/compile_test.go`、`regression_test.go` | 相对导入解析、裸包名/越界拒绝、多组件入口、Build→Verify→篡改检测、构建确定性、manifest 摘要/路径安全、诊断行号 |
-| 运行时 | `internal/rt/rt_test.go`、`regression_test.go` | 端到端:首帧、点击→computed、a-if、a-model、a-for 增长、watch、$t、嵌套组件 props/emit、EUIIMPORT;多窗口事件、handler 跨帧稳定、动态 props、附加包后 HMR、子组件 setup 错误卡片、服务 panic、watch stop |
-| 原生重放 | `backend/mygoui/replay_test.go` | mygo Tester 无窗口驱动:按钮点击、TextInput 双向同步、Checkbox/Segmented 事件与去重 |
+| 编译 | `internal/compile/compile_test.go`、`regression_test.go` | 相对导入解析、裸包名/越界拒绝、多组件入口、Build→Verify→篡改检测、构建确定性、manifest 摘要/路径安全、模板/脚本/样式诊断源文件坐标 |
+| 运行时 | `internal/rt/rt_test.go`、`regression_test.go`、`roadmap_test.go` | 端到端:首帧、点击→computed、a-if、a-model、a-for 增长、watch、$t、嵌套组件 props/emit、EUIIMPORT;多窗口事件、handler 跨帧稳定、动态 props、附加包后 HMR、子组件 setup 错误卡片、服务 panic、watch stop;props 删除同步、零参调用、单次渲染、渲染错误保子实例、HMR 依赖传播、Close 不挂起 |
+| 原生重放 | `backend/mygoui/replay_test.go`、`fixes_test.go` | mygo Tester 无窗口驱动:按钮点击、TextInput 双向同步、Checkbox/Segmented 事件与去重;Split 绑定、容器点击冒泡、非法颜色回退、grow 布局、Text 行内对齐、21 标签重放冒烟 |
+| 后端 | `backend/headless/headless_test.go` | Apply/帧计数/日志、Fire 查树派发、Stop-before-Run 不阻塞、Run/Stop |
 | 公共 API | `app_test.go`、`cmd/adat/main_test.go` | 窗口 id/WindowIDs、Run/Stop 幂等、Inspector 附加窗口、CLI 参数重排 |
 
 运行时测试在 headless 后端上跑:`waitFor` 轮询树状态,等价于真实后端把原生事件翻译成 handler 调用。
 原生重放测试用 mygo 的 `ui.Tester` 在内存里渲染并注入点击/输入,不需要显示器。
 
-CI 见 [.github/workflows/ci.yml](.github/workflows/ci.yml):Linux(CGO=0)做构建 + 核心测试,
-Windows 做全量测试、race 与基准冒烟。
+CI 见 [.github/workflows/ci.yml](.github/workflows/ci.yml):Linux(CGO=0)做 gofmt/vet/构建 + 核心测试,
+Windows 做全量测试、race 与基准冒烟。`backend/mygoui` 的集成测试依赖 mygo 的 headless 渲染,
+只在 Windows 门禁跑;race 覆盖 `. /internal/... /widget /backend/headless /backend/mygoui /cmd/adat`。
 
 ## 7. 目录
 
@@ -395,13 +410,14 @@ internal/expr/               受限表达式 → AST
 internal/templatec/          模板 → RenderPlan
 internal/scriptc/            esbuild TS→ESM
 internal/stylec/             class → 控件属性令牌
-internal/compile/            编译整合 + 相对导入解析 + manifest/Verify
+internal/colorval/           颜色字面量校验(编译期诊断与重放兜底共用)
+internal/compile/            编译整合 + 相对导入解析 + manifest/Verify + 目录指纹
 internal/rt/                 moejs loop 宿主 + 渲染桥
 internal/rt/surface.js       ada:surface(响应式 + Plan 解释器 + 事件分发)
 backend/backend.go           Backend/Dispatcher 契约
 backend/headless/            headless 后端(测试/CI)
 backend/mygoui/              mygo 原生重放后端(GPU 绘制)
-cmd/adat/                    CLI(lint/build/render/run/watch)
+cmd/adat/                    CLI(lint/build/render/inspect/run/watch/version)
 examples/counter/            示例:Counter.aui + main.go(服务桥 + 心跳)
 examples/chat/               示例:聊天(Sidebar/Bubble 子组件、Scroll、回车发送、机器人回声)
 ```
@@ -410,21 +426,26 @@ examples/chat/               示例:聊天(Sidebar/Bubble 子组件、Scroll、�
 
 - **mygo 重放的目测验证**:`backend/mygoui` 的重放逻辑与 API 用法均按 mygo v0.10.0 的公开 API 编写并
   通过编译,但本环境无显示器,未做像素级目测;`adat run` 请在有桌面环境的机器上确认。
-- 输入同步只覆盖 TextInput/NumberInput/Switch/Checkbox;富文本、组合框等未接入。
+- 输入同步覆盖 TextInput/NumberInput/Slider/Stepper/Segmented/Tabs/Table/Rating/Split/Switch/Checkbox/AlertDialog;
+  富文本、组合框、日期选择等未接入。
 - `a-key` 目前只做「缺失告警」,不参与实例身份:列表条目实例按渲染路径(含下标)复用,
   重排或在头部插入条目会带走该位置的组件内部状态。需要稳定条目状态时,建议把状态提升到父组件。
-- 组件级 HMR、Plan 级 diff 优化、子组件跨包引用、远程加载/签名安装(§8)不在本层承诺内。
+- Plan 级 diff 优化、子组件跨包引用、远程加载/签名安装(§8)不在本层承诺内。
 - `ctx.emit` 在 setup 之后触发(渲染期的父绑定);`onUnmount` 由实例清扫保证。
+- 组件标签名必须等于被引用组件编译后的名字(`<meta>` 的 name 或文件名),而不是 `import` 的别名;
+  两者不一致时运行期会报「没有 Plan」。建议保持 `import Sub from './Sub'` 且 `<meta name="Sub">`。
 - 数组批量变更(push/splice)粗粒度触发父键依赖;索引级细粒度留作优化。
 
-### 性能实测(i5-13420H,headless 渲染 pass 全链路)
+### 性能实测(headless,`RenderOnce`:JS 全树求值 + stringify + 跨边界取字符串)
 
-| 场景 | ns/op |
-|---|---|
-| 100 条目列表(每条 3 控件) | ~1.8ms |
-| 500 条目列表 | ~8.7ms |
+| 场景 | i5-13420H | i5-10500 复测 |
+|---|---|---|
+| 100 条目列表(每条 3 控件) | ~1.8ms | 2.5–3.1ms |
+| 500 条目列表 | ~8.7ms | ~12.0–12.2ms |
 
-同一 CPU 上 5 次复测约为 2.2ms / 9.9ms(与上表同量级;含跨边界 JSON 序列化与反序列化)。
+注意:基准调 `RenderOnce`,**不含** Go 侧 `json.Unmarshal`、`widget.Flatten`、后端 `Apply`、flush/notify
+与 no-op 去重,因此真实帧成本高于表中数值。一次状态变更只安排一个渲染 pass(见 `stats.renders`),
+但仍会重算全部窗口的整棵树。
 
 基准(`BenchmarkRenderList*`)作为回归守卫保留。曾实现 keyed a-for 条目记忆化
 (item effect + 缓存子树),基准实测在常见条目规模下簿记开销超过跳过的重求值收益
