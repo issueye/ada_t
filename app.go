@@ -39,6 +39,13 @@ type AppOptions struct {
 	// Inspector 开启内置调试面板:自动多开一个原生窗口,实时展示
 	// 注册表统计与各窗口组件树(每 1.5 秒推送)。
 	Inspector bool
+	// Theme 是初始主题令牌(插件 ctx.theme() 读取;宿主可传 Lobe MyGo tokens)。
+	Theme map[string]any
+	// SlotMode 让 LoadPlugin 自动把槽位贡献挂载成 slot 视图(配合
+	// backend/embed 或 headless;mygoui 会为每个视图新建原生窗口)。
+	SlotMode bool
+	// PluginTrust 是插件信任策略(摘要与签名)。
+	PluginTrust PluginTrust
 }
 
 // WindowOptions 是窗口描述(宽高为 DIP)。
@@ -66,6 +73,10 @@ type App struct {
 	windows []backend.WindowSpec
 	winSeq  int
 
+	slots []string   // 宿主注册的插槽名
+	views []SlotView // 插件槽位视图(SlotMode)
+	theme map[string]any
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
@@ -82,8 +93,9 @@ func NewApp(pkg *compile.Package, opts AppOptions) (*App, error) {
 		Logf:    opts.Logf,
 		Locale:  opts.Locale,
 		AppI18n: opts.AppI18n,
+		Theme:   opts.Theme,
 	}
-	a := &App{pkg: pkg, backend: opts.Backend, opts: opts, stopCh: make(chan struct{})}
+	a := &App{pkg: pkg, backend: opts.Backend, opts: opts, stopCh: make(chan struct{}), theme: opts.Theme}
 	// 后端事件 → rt.Fire(原生事件被翻译成 handler 调用)
 	if d, ok := opts.Backend.(backend.Dispatcher); ok {
 		d.SetDispatch(func(winID, hid string, payload any) {

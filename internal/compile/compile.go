@@ -419,6 +419,59 @@ func joinPath(a, b string) string {
 	return a + "/" + b
 }
 
+// Digest 返回组件包内容的规范摘要(sha256:hex),用于插件完整性校验:
+// 覆盖 entry、每个组件的 Plan/Style/I18n/脚本模块,以及其余可导入模块。
+// 同输入同字节,与落盘产物无关(不依赖文件名大小写或临时目录)。
+func (p *Package) Digest() string {
+	type comp struct {
+		Name   string
+		Module string
+		Plan   []byte
+		Style  map[string]map[string]any
+		I18n   map[string]map[string]string
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "entry:%s\n", p.Entry)
+	comps := make([]comp, 0, len(p.Components))
+	for _, c := range p.Components {
+		comps = append(comps, comp{Name: c.Name, Module: c.Module, Plan: c.Plan, Style: c.Style, I18n: c.I18n})
+	}
+	sort.Slice(comps, func(i, j int) bool { return comps[i].Name < comps[j].Name })
+	for _, c := range comps {
+		sum := sha256.Sum256(c.Plan)
+		fmt.Fprintf(h, "c:%s|%s|%x|%s|%s\n", c.Name, c.Module, sum,
+			canonJSON(c.Style), canonJSON(c.I18n))
+	}
+	// 组件脚本已在组件行覆盖;这里只算其余相对导入模块。
+	compMods := map[string]bool{}
+	for _, c := range comps {
+		compMods[c.Module] = true
+	}
+	names := make([]string, 0, len(p.Modules))
+	for n := range p.Modules {
+		if !compMods[n] {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		sum := sha256.Sum256(p.Modules[n])
+		fmt.Fprintf(h, "m:%s|%x\n", n, sum)
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func canonJSON(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // DirSignature 返回组件目录的变更指纹(路径 + mtime + 大小),供
 // app.WatchDir / adat watch 这类轮询热重载使用。扩展名集合与 CompileDir
 // 的可编译输入保持一致(.aui/.ts/.tsx/.js/.mjs)。

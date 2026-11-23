@@ -42,6 +42,8 @@ type Options struct {
 	// OnTree 在每次渲染 pass 后按窗口回调(任意顺序;tree 只读)。
 	// 回调发生在 loop goroutine 上,实现方不得阻塞。
 	OnTree func(winID string, tree *widget.Node)
+	// Theme 是初始主题令牌(插件通过 ctx.theme() 读取,宿主可用 Lobe MyGo tokens)。
+	Theme map[string]any
 }
 
 // Window 是一个已挂载的窗口。
@@ -50,10 +52,13 @@ type Window struct {
 	Component string
 	Props     map[string]any
 	InstID    string // surface 侧实例 id
+	// Owner 是所属插件 id(空表示宿主窗口);UnloadPlugin 据此回收。
+	Owner string
 
 	mu       sync.RWMutex
 	tree     *widget.Node
 	lastJSON string // 上一帧的渲染 JSON(no-op 跳过)
+	mounted  bool   // surface 侧 mountWindow 是否已完成(未完成跳过渲染)
 }
 
 // Tree 返回窗口最新渲染树(快照引用;调用方不得修改)。
@@ -94,6 +99,15 @@ type Runtime struct {
 
 	knownMu    sync.Mutex
 	knownComps map[string]bool // 已装载的组件名(含附加包;MountWindow 校验用)
+
+	pluginMu sync.Mutex
+	plugins  map[string]*loadedPlugin // 已装载插件
+
+	themeMu sync.Mutex
+	theme   map[string]any
+
+	hostMu    sync.Mutex
+	hostHooks []func(name string, payload any)
 }
 
 // New 创建运行时:启动 loop、注入宿主能力、加载 surface 与全部组件。
@@ -115,6 +129,8 @@ func New(pkg *compile.Package, opts Options) (*Runtime, error) {
 		toastQ:     map[string][]string{},
 		knownComps: map[string]bool{},
 		defined:    map[string]bool{},
+		plugins:    map[string]*loadedPlugin{},
+		theme:      map[string]any{},
 		closedCh:   make(chan struct{}),
 	}
 
@@ -181,6 +197,11 @@ func (r *Runtime) init() error {
 	}
 	if err := setFn("log", r.nativeLog()); err != nil {
 		return fmt.Errorf("rt: 注入 __adatHost.log 失败: %w", err)
+	}
+	// emit:插件 ctx.emitHost(ev, payload) → 宿主 Go 回调(事件名已被
+	// surface 加上 "plugin.<id>." 前缀,避免与宿主事件串流)。
+	if err := setFn("emit", r.nativeEmit()); err != nil {
+		return fmt.Errorf("rt: 注入 __adatHost.emit 失败: %w", err)
 	}
 	if err := realm.Global.SetProp(realm, realm.KeyFromGoString("__adatHost"), engine.ObjectValue(hostObj)); err != nil {
 		return fmt.Errorf("rt: 注入 __adatHost 失败: %w", err)
@@ -265,6 +286,12 @@ func (r *Runtime) init() error {
 		b, _ := json.Marshal(r.opts.AppI18n)
 		if _, err := r.callString("setAppI18n", string(b)); err != nil {
 			return fmt.Errorf("rt: setAppI18n 失败: %w", err)
+		}
+	}
+	if len(r.opts.Theme) > 0 {
+		b, _ := json.Marshal(r.opts.Theme)
+		if _, err := r.callString("setTheme", string(b)); err != nil {
+			return fmt.Errorf("rt: setTheme 失败: %w", err)
 		}
 	}
 	return nil
@@ -354,6 +381,38 @@ func (r *Runtime) DrainToasts(winID string) []string {
 	return q
 }
 
+// nativeEmit:插件 ctx.emitHost(ev, payload) → 宿主 Go 监听(异步派发,
+// 避免监听者在 loop 上再调 rt 方法时自锁)。
+func (r *Runtime) nativeEmit() moejs.NativeFunc {
+	return func(_ *engine.Realm, _ engine.Value, args []engine.Value) (engine.Value, error) {
+		if len(args) == 0 {
+			return engine.Undefined(), fmt.Errorf("emit(name, payload) 至少需要事件名")
+		}
+		nameV, err := r.raw.ToGo(args[0])
+		if err != nil {
+			return engine.Undefined(), fmt.Errorf("rt: emit 事件名无法转换: %w", err)
+		}
+		name, _ := nameV.(string)
+		var payload any
+		if len(args) > 1 {
+			s, _ := r.raw.ToGo(args[1])
+			if pj, ok := s.(string); ok && pj != "" {
+				if err := json.Unmarshal([]byte(pj), &payload); err != nil {
+					return engine.Undefined(), fmt.Errorf("rt: emit 载荷不是合法 JSON: %w", err)
+				}
+			}
+		}
+		r.hostMu.Lock()
+		hooks := append([]func(string, any){}, r.hostHooks...)
+		r.hostMu.Unlock()
+		for _, fn := range hooks {
+			fn := fn
+			go fn(name, payload)
+		}
+		return engine.Undefined(), nil
+	}
+}
+
 func (r *Runtime) nativeLog() moejs.NativeFunc {
 	return func(_ *engine.Realm, _ engine.Value, args []engine.Value) (engine.Value, error) {
 		parts := make([]any, 0, len(args))
@@ -391,6 +450,12 @@ func (r *Runtime) renderPass() {
 	}
 	r.mu.Unlock()
 	for _, w := range wins {
+		w.mu.RLock()
+		mounted := w.mounted
+		w.mu.RUnlock()
+		if !mounted {
+			continue // 挂载任务还没执行(避免 "窗口未挂载" 噪声)
+		}
 		out, err := r.callString("renderWindow", w.ID)
 		if err != nil {
 			r.logf("rt: 渲染窗口 %s 失败: %v", w.ID, err)
@@ -422,13 +487,19 @@ func (r *Runtime) renderPass() {
 
 // MountWindow 挂载一个窗口(组件必须已装载:主包或附加包)。
 func (r *Runtime) MountWindow(winID, component string, props map[string]any) (*Window, error) {
+	return r.MountWindowOwned(winID, component, props, "")
+}
+
+// MountWindowOwned 挂载一个属于某插件的窗口/槽位视图(owner 为空即宿主)。
+// 卸载插件时这些视图会被自动回收。
+func (r *Runtime) MountWindowOwned(winID, component string, props map[string]any, owner string) (*Window, error) {
 	r.knownMu.Lock()
 	found := r.knownComps[component]
 	r.knownMu.Unlock()
 	if !found {
 		return nil, fmt.Errorf("rt: 组件 %q 未编译注册", component)
 	}
-	w := &Window{ID: winID, Component: component, Props: props}
+	w := &Window{ID: winID, Component: component, Props: props, Owner: owner}
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
@@ -446,6 +517,9 @@ func (r *Runtime) MountWindow(winID, component string, props map[string]any) (*W
 		return nil, fmt.Errorf("rt: 挂载窗口 %s 失败: %w", winID, err)
 	}
 	w.InstID = instID
+	w.mu.Lock()
+	w.mounted = true
+	w.mu.Unlock()
 	r.scheduleRender() // 首帧
 	return w, nil
 }

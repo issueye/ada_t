@@ -174,3 +174,32 @@ adat watch <dir> -entry X        # 热重载(模板变状态保留;脚本/依赖
 
 常见错误:`EUISTRUCT` 结构 · `EUITEMPLATE` 指令/标签/属性 · `EUIEXPR` 表达式 ·
 `EUISTYLE` 样式 · `EUISECURITY` on*/a-html · `EUIIMPORT` 裸包名导入 · `EUIARTIFACT` 产物摘要。
+
+## 插件(宿主视角)
+
+```sh
+adat plugin show  <dir>            # 查看 plugin.json
+adat plugin build <dir> -write     # 编译 + 把 sha256 写回清单
+```
+
+```json
+// plugin.json
+{ "id": "hello", "version": "0.1.0", "entry": "HelloCard",
+  "capabilities": ["host.greet"],
+  "slots": [{ "slot": "sidebar.item", "component": "HelloSide", "order": 10 }] }
+```
+
+```go
+// 宿主
+app.RegisterSlot(plugin.SlotSidebarItem)
+app.ExposeHost("host", "greet", func() string { return "hi" })
+info, _ := app.LoadPluginDir("path/to/plugin")
+for _, v := range app.SlotViews(plugin.SlotSidebarItem) { b.Draw(c, v.ID) }
+app.EmitTo("hello", "ping", nil)         // 宿主 → 插件
+app.OnPluginEvent(func(id, ev string, p any) { … }) // 插件 → 宿主(ctx.emitHost)
+app.UnloadPlugin("hello")
+```
+
+插件内:`ctx.theme()` / `ctx.theme('fg')`(宿主令牌)、`ctx.emitHost('cmd', p)`、
+`ctx.pluginId`;`ctx.on` 只订阅 `plugin.<id>.*`;`ctx.api.call('host', 'x')` 需在
+`capabilities` 声明 `host.x`,否则抛异常。完整说明见 [plugins.md](plugins.md)。

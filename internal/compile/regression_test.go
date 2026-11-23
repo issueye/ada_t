@@ -116,6 +116,43 @@ func TestCompileDirRequiresEntryForMultipleAUI(t *testing.T) {
 	}
 }
 
+// TestPackageDigest:产物摘要同输入稳定、内容变化即变(插件完整性校验用)。
+func TestPackageDigest(t *testing.T) {
+	files := map[string]string{
+		"A.aui": `<meta>{ "name": "A" }</meta>
+<template><Column><Text>{{ state.n }}</Text></Column></template>
+<script lang="ts">
+import { reactive } from 'ada:surface'
+export default { setup() { const state = reactive({ n: 1 }); return { state } } }
+</script>
+<style scoped>.x { color: #abc; }</style>
+<i18n>{ "zh-CN": { "k": "v" } }</i18n>`,
+		"util.ts": "export const K = 1",
+	}
+	p1, err := CompileFiles("A.aui", files, Options{})
+	if err != nil {
+		t.Fatalf("编译: %v", err)
+	}
+	p2, err := CompileFiles("A.aui", files, Options{})
+	if err != nil {
+		t.Fatalf("编译(第二次): %v", err)
+	}
+	if p1.Digest() != p2.Digest() {
+		t.Fatalf("同输入摘要不稳定: %s != %s", p1.Digest(), p2.Digest())
+	}
+	if len(p1.Digest()) != len("sha256:")+64 {
+		t.Fatalf("摘要格式异常: %q", p1.Digest())
+	}
+	files["util.ts"] = "export const K = 2"
+	p3, err := CompileFiles("A.aui", files, Options{})
+	if err != nil {
+		t.Fatalf("编译(改依赖后): %v", err)
+	}
+	if p3.Digest() == p1.Digest() {
+		t.Fatal("依赖模块变化后摘要应变化")
+	}
+}
+
 // TestWarningUsesFileCoordinates:模板告警也要回填 <template> 块偏移。
 func TestWarningUsesFileCoordinates(t *testing.T) {
 	src := `<template>

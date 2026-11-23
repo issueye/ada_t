@@ -139,6 +139,38 @@ ADAT_CHAT_WATCH=1 ADAT_CHAT_DEMO=1 go run ./examples/chat   # 示例自带 watch
 极端循环场景未承诺;`scanImports` 是词法扫描,注释/字符串里形如 import 的文本可能被误判为依赖
 (只会导致多定义一次,不会错更新)。
 
+## 插件(宿主把组件包嵌进自己的窗口)
+
+`.aui` 不仅能驱动自己的窗口,也能作为**插件**嵌进宿主(如 ada_chat)已有的 mygo 界面:
+宿主决定位置/尺寸/主题,插件只声明「槽位 + 组件」,能调哪些服务由能力白名单控制。
+完整设计见 [docs/plugins.md](docs/plugins.md)。
+
+```go
+hostPkg, _ := adat.CompileDir("examples/plugin-host/host", "")
+b := embed.New(embed.Options{Theme: tokens})
+app, _ := adat.NewApp(hostPkg, adat.AppOptions{Backend: b, SlotMode: true, Theme: tokens})
+app.RegisterSlot(plugin.SlotSidebarItem)
+app.ExposeHost("host", "greet", func() string { return "hi" })
+_, _ = app.LoadPluginDir("examples/plugins/hello")
+for _, v := range app.SlotViews(plugin.SlotSidebarItem) { b.Draw(c, v.ID) } // 宿主自己的 view
+app.EmitTo("hello", "ping", nil)                                          // 宿主 → 插件
+app.UnloadPlugin("hello")                                                 // 视图/组件/订阅一起回收
+```
+
+- **清单** `plugin.json`:`id/version/entry/deps/capabilities/slots`,可选 `sha256`/`signature`。
+- **槽位**:`sidebar.item` / `chat.header_action` / `composer.action` / `message.renderer` /
+  `settings.tab` / `command`(宿主可自定义)。
+- **能力**:插件 `ctx.api.call('host', 'bots.list')` 必须在 `capabilities` 声明 `host.bots.list`,
+  否则抛异常;`HostCapabilities()` 可生成白名单文档。
+- **事件**:插件 `ctx.on` 只订阅 `plugin.<id>.*`;`ctx.emitHost` → 宿主 `OnPluginEvent`。
+- **主题**:`ctx.theme()` 读宿主下发的 token,模板里 `a-bind:color="theme.fg"`。
+- **信任**:`PluginTrust{RequireDigest, PublicKeys}`;内部插件用 `adat plugin build -write` 写摘要,
+  第三方用 ed25519 签名。
+- **边界**:同进程,安全靠编译期(受限表达式/无 eval)+ 能力白名单,**不是进程隔离**。
+
+示例:`go run ./examples/plugin-host`(宿主原生窗口 + Hello 插件),插件源码在
+`examples/plugins/hello/`。
+
 ## 截图
 
 聊天(多组件 + Go 推送 + 对话框/Toast;图见 `docs/screenshots/`):
@@ -391,6 +423,7 @@ dist/ui/
 | 运行时 | `internal/rt/rt_test.go`、`regression_test.go`、`roadmap_test.go` | 端到端:首帧、点击→computed、a-if、a-model、a-for 增长、watch、$t、嵌套组件 props/emit、EUIIMPORT;多窗口事件、handler 跨帧稳定、动态 props、附加包后 HMR、子组件 setup 错误卡片、服务 panic、watch stop;props 删除同步、零参调用、单次渲染、渲染错误保子实例、HMR 依赖传播、Close 不挂起 |
 | 原生重放 | `backend/mygoui/replay_test.go`、`fixes_test.go` | mygo Tester 无窗口驱动:按钮点击、TextInput 双向同步、Checkbox/Segmented 事件与去重;Split 绑定、容器点击冒泡、非法颜色回退、grow 布局、Text 行内对齐、21 标签重放冒烟 |
 | 后端 | `backend/headless/headless_test.go` | Apply/帧计数/日志、Fire 查树派发、Stop-before-Run 不阻塞、Run/Stop |
+| 插件 | `plugin/plugin_test.go`、`internal/rt/plugin_test.go`、`plugin_host_test.go` | 清单校验/通配/ed25519 签名;装载首帧、能力允许/拒绝、事件前缀、模块前缀隔离、卸载回滚、重名拒绝;公共 API + embed 绘制 + 点击回传 + 主题 + 槽位注册 + 信任策略;示例插件不漂移 |
 | 公共 API | `app_test.go`、`cmd/adat/main_test.go` | 窗口 id/WindowIDs、Run/Stop 幂等、Inspector 附加窗口、CLI 参数重排 |
 
 运行时测试在 headless 后端上跑:`waitFor` 轮询树状态,等价于真实后端把原生事件翻译成 handler 调用。
@@ -398,7 +431,7 @@ dist/ui/
 
 CI 见 [.github/workflows/ci.yml](.github/workflows/ci.yml):Linux(CGO=0)做 gofmt/vet/构建 + 核心测试,
 Windows 做全量测试、race 与基准冒烟。`backend/mygoui` 的集成测试依赖 mygo 的 headless 渲染,
-只在 Windows 门禁跑;race 覆盖 `. /internal/... /widget /backend/headless /backend/mygoui /cmd/adat`。
+只在 Windows 门禁跑;race 覆盖 `. /internal/... /plugin /widget /backend/headless /backend/mygoui /backend/embed /cmd/adat`。
 
 ## 7. 目录
 
@@ -416,10 +449,15 @@ internal/rt/                 moejs loop 宿主 + 渲染桥
 internal/rt/surface.js       ada:surface(响应式 + Plan 解释器 + 事件分发)
 backend/backend.go           Backend/Dispatcher 契约
 backend/headless/            headless 后端(测试/CI)
-backend/mygoui/              mygo 原生重放后端(GPU 绘制)
-cmd/adat/                    CLI(lint/build/render/inspect/run/watch/version)
+backend/mygoui/              mygo 原生重放后端(GPU 绘制;Renderer 可嵌进宿主 Context)
+backend/embed/               embed 后端:槽位树画进宿主自己的 ui.Context
+plugin/                      插件清单(manifest/能力/签名)与槽位常量
+plugin_host.go               公共插件 API(LoadPlugin/UnloadPlugin/SlotViews/信任策略)
+cmd/adat/                    CLI(lint/build/render/inspect/run/watch/plugin/version)
 examples/counter/            示例:Counter.aui + main.go(服务桥 + 心跳)
 examples/chat/               示例:聊天(Sidebar/Bubble 子组件、Scroll、回车发送、机器人回声)
+examples/plugin-host/        示例:宿主原生窗口 + 插件槽位(Draw)
+examples/plugins/hello/      示例插件:plugin.json + 两个槽位组件
 ```
 
 ## 8. 已知边界与后续项
@@ -431,6 +469,9 @@ examples/chat/               示例:聊天(Sidebar/Bubble 子组件、Scroll、�
 - `a-key` 目前只做「缺失告警」,不参与实例身份:列表条目实例按渲染路径(含下标)复用,
   重排或在头部插入条目会带走该位置的组件内部状态。需要稳定条目状态时,建议把状态提升到父组件。
 - Plan 级 diff 优化、子组件跨包引用、远程加载/签名安装(§8)不在本层承诺内。
+- 插件(见 [docs/plugins.md](docs/plugins.md)):同进程、同 loop;安全靠编译期受限表达式与能力白名单,
+  **不是**运行时权限隔离。组件名全局唯一;插件不参与主包 HMR(改动后 UnloadPlugin + 重装);
+  `deps` 只记录不解析;插件不能自己 Expose 服务。
 - `ctx.emit` 在 setup 之后触发(渲染期的父绑定);`onUnmount` 由实例清扫保证。
 - 组件标签名必须等于被引用组件编译后的名字(`<meta>` 的 name 或文件名),而不是 `import` 的别名;
   两者不一致时运行期会报「没有 Plan」。建议保持 `import Sub from './Sub'` 且 `<meta name="Sub">`。

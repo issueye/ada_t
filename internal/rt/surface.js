@@ -331,6 +331,9 @@ const handlers = new Map()   // hid → { inst, action, frames, gen }
 const windows = new Map()    // winId → instId
 const services = new Map()   // name → { method → 宿主原生函数 } (ctx.api.call)
 const eventHandlers = new Map() // event → Set<{inst, fn}>(Go → 组件事件)
+const componentPlugins = new Map() // 组件名 → 插件 id(宿主组件为空)
+const pluginScopes = new Map()      // 插件 id → Set<能力名>(默认拒绝)
+let themeTokens = {}                // 宿主主题令牌(ctx.theme / 模板里 theme.* 用)
 let seq = 0
 let renderGen = 0 // 渲染代数:每轮渲染递增;旧代 handler 渲染后被清扫
 let renderCount = 0 // 渲染 pass 计数(stats 暴露,回归「一次变更一次渲染」)
@@ -355,13 +358,49 @@ function makeInstance(name, propsObj) {
     eventRegs: [],      // ctx.on 的订阅记录(卸载时退订)
     children: new Map(), // cacheKey → instId(本实例的子组件)
     child: null,        // 渲染期临时:当前 comp 节点的父登记
+    plugin: componentPlugins.get(name) || '', // 所属插件 id(宿主组件为空)
   }
   instances.set(inst.id, inst)
   return inst
 }
 
+// requireCapability:插件只能调用清单里声明的服务方法(默认拒绝)。
+// 宿主组件不受限(plugin 为空)。
+function requireCapability(inst, service, method) {
+  const pid = inst.plugin
+  if (!pid) return
+  const key = String(service) + '.' + String(method)
+  const scope = pluginScopes.get(pid)
+  if (scope === undefined) {
+    throw new Error('surface: 插件 ' + pid + ' 未登记能力白名单')
+  }
+  if (scope.has(key) || scope.has('*')) return
+  for (const c of scope) {
+    if (c.endsWith('.*') && key.startsWith(c.slice(0, -1))) return
+  }
+  throw new Error('surface: 插件 ' + pid + ' 无能力调用 ' + key + '(需在 plugin.json 的 capabilities 声明)')
+}
+
 function makeCtx(inst) {
   return {
+    // 插件 id(宿主组件为空串)
+    pluginId: inst.plugin || '',
+    // theme(key?):宿主主题令牌;不传 key 返回整个对象,缺失 key 返回 ''
+    theme(key) {
+      // 返回副本:插件不能改写宿主的主题对象
+      if (key === undefined) return Object.assign({}, themeTokens)
+      const v = themeTokens[String(key)]
+      return v === undefined ? '' : v
+    },
+    // emitHost(event, payload):插件 → 宿主,事件名自动加 plugin.<id>. 前缀
+    emitHost(event, payload) {
+      if (!inst.plugin) {
+        __adatHost.log('surface: emitHost 只能在插件组件里调用(' + inst.name + ')')
+        return
+      }
+      __adatHost.emit('plugin.' + inst.plugin + '.' + String(event),
+        payload === undefined ? '' : JSON.stringify(payload))
+    },
     emit(event, payload) {
       const reg = inst.emitMap[event]
       if (reg === undefined) {
@@ -385,6 +424,7 @@ function makeCtx(inst) {
     // 慢任务请用 callAsync:Go 侧跑在独立 goroutine,返回 Promise,不阻塞渲染。
     api: {
       call(service, method, ...args) {
+        requireCapability(inst, service, method)
         const svc = services.get(String(service))
         if (svc === undefined) {
           throw new Error('surface: 服务未注册: ' + service)
@@ -396,6 +436,7 @@ function makeCtx(inst) {
         return fn(JSON.stringify(args))
       },
       callAsync(service, method, ...args) {
+        requireCapability(inst, service, method)
         const svc = services.get(String(service))
         if (svc === undefined) {
           throw new Error('surface: 服务未注册: ' + service)
@@ -408,11 +449,13 @@ function makeCtx(inst) {
       },
     },
     // on(event, fn):订阅 Go 侧 Notify 的广播事件;实例卸载时自动退订。
+    // 插件组件只订阅自己命名空间的事件(plugin.<id>.):宿主 EmitTo 才可达,
+    // 避免多插件之间事件串流。
     on(event, fn) {
       if (typeof fn !== 'function') {
         throw new Error('surface: ctx.on 需要函数')
       }
-      const key = String(event)
+      const key = inst.plugin ? 'plugin.' + inst.plugin + '.' + String(event) : String(event)
       let hs = eventHandlers.get(key)
       if (hs === undefined) eventHandlers.set(key, (hs = new Set()))
       const entry = { inst, fn }
@@ -1125,7 +1168,8 @@ function fireHandler(hid, payloadJSON) {
 const PLAN_VERSION = 1
 
 // registerComponent 注册一个组件:Plan JSON、样式令牌、i18n、脚本 default export。
-export function registerComponent(name, planJSON, styleJSON, i18nJSON, def) {
+// pluginID 可选:插件包的组件带上归属(能力校验与卸载按它定位)。
+export function registerComponent(name, planJSON, styleJSON, i18nJSON, def, pluginID) {
   const plan = JSON.parse(planJSON)
   if (plan.planVersion !== PLAN_VERSION) {
     throw new Error('surface: 组件 ' + name + ' 的 Plan 版本 ' + plan.planVersion + ' 不支持(需要 ' + PLAN_VERSION + ')')
@@ -1138,6 +1182,73 @@ export function registerComponent(name, planJSON, styleJSON, i18nJSON, def) {
     i18n.set(name, JSON.parse(i18nJSON))
   }
   components.set(name, def || {})
+  if (pluginID !== undefined && pluginID !== null && pluginID !== '') {
+    componentPlugins.set(String(name), String(pluginID))
+  }
+}
+
+// bindPlugin 登记插件的能力白名单与组件归属(HMR 装载路径用:组件先
+// 经 __adatHMRAdopt 注册,再一次性绑定插件身份)。
+export function bindPlugin(pluginID, capsJSON, compsJSON) {
+  const caps = JSON.parse(capsJSON || '[]')
+  pluginScopes.set(String(pluginID), new Set(caps))
+  const comps = JSON.parse(compsJSON || '[]')
+  for (const name of comps) componentPlugins.set(String(name), String(pluginID))
+}
+
+// unbindPlugin 移除插件登记(组件本身由 unregisterComponents 注销)。
+export function unbindPlugin(pluginID) {
+  pluginScopes.delete(String(pluginID))
+  for (const [name, pid] of Array.from(componentPlugins)) {
+    if (pid === String(pluginID)) componentPlugins.delete(name)
+  }
+}
+
+// unregisterComponents 注销一组组件:先 dispose 它们的全部实例(连带子
+// 实例/订阅/handler),再删注册表。插件卸载时调用。
+export function unregisterComponents(namesJSON) {
+  const names = JSON.parse(namesJSON || '[]')
+  for (const name of names) {
+    for (const [, inst] of Array.from(instances)) {
+      if (inst.name === name) disposeInstance(inst)
+    }
+    components.delete(name)
+    plans.delete(name)
+    styles.delete(name)
+    i18n.delete(name)
+    componentPlugins.delete(name)
+  }
+}
+
+// forgetModules 删除 CJS 注册表里某前缀的模块(插件卸载后不再可 require)。
+export function forgetModules(prefix) {
+  const p = String(prefix)
+  for (const key of Array.from(cjsCache.keys())) {
+    if (key.startsWith(p)) cjsCache.delete(key)
+  }
+  for (const key of Array.from(requireMaps.keys())) {
+    if (key.startsWith(p)) requireMaps.delete(key)
+  }
+}
+
+// setTheme 设置宿主主题令牌(插件 ctx.theme() 与模板中的 theme.* 读取)。
+export function setTheme(json) {
+  themeTokens = json === null || json === undefined || json === ''
+    ? {}
+    : JSON.parse(json)
+}
+
+// serviceCapabilities 返回已暴露的服务方法(service.method),供宿主
+// 生成插件能力白名单文档 / 校验插件清单。
+export function serviceCapabilities() {
+  const names = []
+  for (const [svc, methods] of services) {
+    for (const m of Object.keys(methods)) {
+      if (m.endsWith('!async')) continue
+      names.push(svc + '.' + m)
+    }
+  }
+  return JSON.stringify(names)
 }
 
 // setLocale 设置当前语言(zh-CN 等)。
@@ -1211,6 +1322,7 @@ export function stats() {
     handlers: handlers.size,
     eventSubs: subs,
     windows: windows.size,
+    plugins: pluginScopes.size,
     seq,
     renders: renderCount,
   })
@@ -1231,6 +1343,12 @@ globalThis.__adatSurface = {
   registerService,
   fireHostEvent,
   stats,
+  bindPlugin,
+  unbindPlugin,
+  unregisterComponents,
+  forgetModules,
+  setTheme,
+  serviceCapabilities,
 }
 
 // ============================================================

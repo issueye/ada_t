@@ -42,6 +42,8 @@ func main() {
 		err = cmdRun(os.Args[2:], false)
 	case "watch":
 		err = cmdRun(os.Args[2:], true)
+	case "plugin":
+		err = cmdPlugin(os.Args[2:])
 	case "version":
 		fmt.Println("adat 0.1.0 (planVersion", widget.PlanVersion, ")")
 	case "help", "-h", "--help":
@@ -116,6 +118,8 @@ func usage() {
   adat inspect <dir> [-live 2s]   headless 打印 stats 与组件树(可周期刷新)
   adat run     <dir>              打开 mygo 原生窗口(GPU 绘制)
   adat watch   <dir>              run + 文件监听热重载(状态保留或重跑 setup)
+  adat plugin  build <dir> [-write]  编译插件目录,打印/写回 sha256 摘要
+  adat plugin  show  <dir>          打印插件清单
   adat version                    版本与 planVersion
 
 .aui 组件 = <template>(Ada 指令) + <script lang="ts">(esbuild 降级)
