@@ -310,6 +310,12 @@ func (a *App) OnPluginEvent(fn func(pluginID, event string, payload any)) {
 
 // —— 编译入口(宿主无需 import internal 包) ——
 
+// CompileSource 从内存源码编译一个组件包(宿主不需要为「占位组件」落盘)。
+// entryFile 形如 "Host.aui"。
+func CompileSource(entryFile, src string) (*compile.Package, error) {
+	return compile.CompileFiles(entryFile, map[string]string{entryFile: src}, compile.Options{})
+}
+
 // CompileDir 编译一个组件目录(entry 为空时目录内只能有一个 .aui)。
 func CompileDir(dir, entry string) (*compile.Package, error) {
 	return compile.CompileDir(dir, compile.Options{Entry: entry})
